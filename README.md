@@ -1,14 +1,18 @@
 # CharacterCadre
 
-Browser-based local RPG roleplay app powered by Ollama. Features a multi-phase game loop with a Director AI, DM narration, companion characters, and player option drafting.
+Browser-based local RPG roleplay app powered by [Ollama](https://ollama.com/). Runs entirely on your own hardware — no cloud services or API keys required.
+
+Features a multi-phase AI game loop with a Director (scene steering), DM (narration), Companion characters (in-character responses), and Player option drafting. Includes full editors for characters and scenarios, save/load support, and automatic context summarisation to stay within model token limits.
 
 ## Prerequisites
 
 - Python 3.11+
 - Node 18+
-- [Ollama](https://ollama.com/) installed and running
+- [Ollama](https://ollama.com/) installed
 
-## Backend Setup
+## Setup
+
+**Backend**
 
 ```bash
 cd backend
@@ -20,17 +24,16 @@ python -m venv .venv
 source .venv/bin/activate
 
 pip install -e ".[dev]"
-pip freeze > requirements.lock
 ```
 
-## Frontend Setup
+**Frontend**
 
 ```bash
 cd frontend
 npm install
 ```
 
-## Pull a Model
+**Pull a model**
 
 ```bash
 ollama pull mistral-small3.1
@@ -38,12 +41,19 @@ ollama pull mistral-small3.1
 
 ## Running
 
-Open two terminals:
+The easiest way is the unified launcher, which starts Ollama, the backend, and the frontend in a single terminal:
+
+```bash
+python launch.py
+```
+
+Add `--debug` to enable LLM request/response logging to `logs/`.
+
+Alternatively, start each service manually in separate terminals:
 
 ```bash
 # Terminal 1 — backend
 cd backend
-.venv\Scripts\activate
 uvicorn app.main:app --reload --port 8000
 
 # Terminal 2 — frontend
@@ -61,49 +71,71 @@ Open [http://localhost:5173](http://localhost:5173) in your browser.
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama API base URL |
 | `OLLAMA_STREAM_IDLE_SECONDS` | `20` | Per-token idle timeout for streaming calls |
 | `OLLAMA_STRUCTURED_TIMEOUT_SECONDS` | `30` | Total timeout for structured (non-streaming) calls |
-| `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
-| `DATA_DIR` | `data` | Path to data directory (relative to backend/) |
+| `LOG_LEVEL` | `INFO` | Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`) |
+| `DATA_DIR` | `data` | Path to data directory (relative to `backend/`) |
 | `PORT` | `8000` | Port (used in startup banner only; uvicorn sets the actual port) |
 
-Set via shell before starting the backend, e.g.:
+Set via shell before starting the backend:
+
 ```bash
-set LOG_LEVEL=DEBUG   # Windows
-export LOG_LEVEL=DEBUG  # macOS/Linux
+set LOG_LEVEL=DEBUG    # Windows
+export LOG_LEVEL=DEBUG # macOS/Linux
 ```
 
 ## Running Tests
 
 ```bash
 cd backend
-pytest tests/unit/ -v
+pytest tests/unit/         # fast, no running server needed
+pytest tests/integration/  # requires Ollama running
+pytest tests/resilience/   # error-handling and edge cases
+pytest tests/              # all of the above
 ```
 
 ## Project Structure
 
 ```
 charactercadre/
+├── launch.py                    # Unified launcher (Ollama + backend + frontend)
 ├── backend/
 │   ├── app/
 │   │   ├── main.py              # FastAPI entrypoint
-│   │   ├── logging_config.py    # Logging setup
-│   │   ├── ollama_client.py     # Ollama wrapper (streaming + structured)
-│   │   ├── prompt_builder.py    # Context assembly + token truncation
 │   │   ├── models.py            # Pydantic domain models
+│   │   ├── phases.py            # Multi-phase game loop
+│   │   ├── prompt_builder.py    # Context assembly + token truncation
+│   │   ├── summarizer.py        # Automatic context summarisation
+│   │   ├── ollama_client.py     # Ollama wrapper (streaming + structured)
 │   │   ├── storage.py           # JSON file I/O
+│   │   ├── validation.py        # Input validation
 │   │   ├── variables.py         # {{user}} / {{char}} substitution
-│   │   ├── fixtures.py          # Hardcoded Stage 1 scenario and characters
+│   │   ├── seed.py              # Sample data seeding
+│   │   ├── silly_tavern.py      # SillyTavern character card import
+│   │   ├── llm_logger.py        # LLM request/response logging
+│   │   ├── logging_config.py    # Logging setup
 │   │   └── routes/
-│   │       ├── debug.py         # /api/debug/* (prompt inspection)
-│   │       └── turn.py          # /api/chat/turn (Stage 2 multi-phase loop)
-│   ├── data/
-│   │   └── saves/               # stage1.json (gitignored)
+│   │       ├── chat.py          # POST /api/chat/turn
+│   │       ├── characters.py    # /api/characters CRUD
+│   │       ├── scenarios.py     # /api/scenarios CRUD
+│   │       ├── saves.py         # /api/saves CRUD
+│   │       ├── health.py        # /api/health
+│   │       └── debug.py         # /api/debug/* (prompt inspection)
+│   ├── data/                    # Local saves, characters, scenarios (gitignored)
+│   ├── scripts/
+│   │   └── seed_long_history.py # Test data generator
 │   └── tests/
-│       └── unit/
-├── frontend/
-│   └── src/
-│       ├── components/Chat.tsx
-│       ├── hooks/useStream.ts
-│       ├── api/client.ts
-│       └── types/index.ts
-└── README.md
+│       ├── unit/
+│       ├── integration/
+│       └── resilience/
+└── frontend/
+    └── src/
+        ├── pages/
+        │   ├── MainMenu.tsx
+        │   ├── NewGame.tsx
+        │   ├── Game.tsx
+        │   ├── EditCharacters.tsx
+        │   └── EditScenarios.tsx
+        ├── components/
+        ├── hooks/useStream.ts   # Server-Sent Events streaming
+        ├── api/client.ts
+        └── types/index.ts
 ```
