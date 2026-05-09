@@ -1,0 +1,39 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m venv .venv)",
+      "Bash(.venv\\\\Scripts\\\\python.exe -m pip install --quiet -e \".[dev]\")",
+      "Bash(.venv/Scripts/python.exe -m pip install --quiet -e \".[dev]\")",
+      "Bash(.venv/Scripts/python.exe -m pip install --quiet fastapi==0.115.6 \"uvicorn[standard]==0.32.1\" ollama==0.4.4 pydantic==2.10.4 tiktoken==0.8.0 python-multipart==0.0.19 pytest==8.3.4 pytest-asyncio==0.24.0 httpx==0.28.1)",
+      "Bash(.venv/Scripts/python.exe -m pip install ollama==0.4.4)",
+      "Bash(.venv/Scripts/python.exe -m pip show ollama httpx)",
+      "Bash(.venv/Scripts/python.exe -m pip install --quiet fastapi==0.115.6 \"uvicorn[standard]==0.32.1\" pydantic==2.10.4 tiktoken==0.8.0 python-multipart==0.0.19 pytest==8.3.4 pytest-asyncio==0.24.0)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/unit/ -v)",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Bash(.venv/Scripts/python.exe -m pip freeze)",
+      "Bash(.venv/Scripts/python.exe -c \"from app.storage import _write_save; from app.prompt_builder import _count_messages_tokens; print\\('imports ok'\\)\")",
+      "Bash(.venv/Scripts/python.exe scripts/seed_long_history.py)",
+      "Bash(.venv/Scripts/python.exe scripts/seed_long_history.py --reset)",
+      "Bash(.venv/Scripts/python.exe scripts/seed_long_history.py --tight)",
+      "Bash(.venv/Scripts/python.exe scripts/seed_long_history.py --reset --pairs 0)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/unit/ -q)",
+      "Bash(python -m pytest tests/unit/ -v --tb=short)",
+      "Bash(pip install *)",
+      "Bash(python -m pytest tests/integration/ -v --tb=short)",
+      "Bash(python -m pytest tests/resilience/ -v --tb=short)",
+      "Bash(python -m pytest tests/ -v --tb=short)",
+      "Bash(npx tsc *)",
+      "Bash(python -m pytest tests/ -q --tb=short)",
+      "Bash(python -m pytest tests/ -q -W error::DeprecationWarning)",
+      "Bash(python -m pytest tests/ -W error::DeprecationWarning)",
+      "Bash(python -m pytest tests/ -x --tb=short)",
+      "Bash(python -m pytest tests/unit/ -x --tb=short)",
+      "Bash(python -m pytest tests/unit/test_silly_tavern.py -x --tb=short)",
+      "Bash(python -m pytest tests/unit/ --tb=short)",
+      "Bash(python -m pytest tests/integration/test_routes.py --tb=short)",
+      "Bash(python -m pytest --tb=short)",
+      "Bash(python -m pytest tests/ -x -q)"
+    ]
+  }
+}
