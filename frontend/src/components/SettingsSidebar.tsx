@@ -40,6 +40,7 @@ export default function SettingsSidebar({
 }: SettingsSidebarProps) {
   const [noLimit, setNoLimit] = useState(maxResponseTokens === null)
   const [maxTokensInput, setMaxTokensInput] = useState(maxResponseTokens ?? 2048)
+  const [contextLengthDisplay, setContextLengthDisplay] = useState(save?.max_context_tokens ?? 8192)
 
   const disabled = isStreaming
 
@@ -75,13 +76,14 @@ export default function SettingsSidebar({
             min={512}
             max={128000}
             step={512}
-            value={save?.max_context_tokens ?? 8192}
-            onChange={e => onContextLengthChange(Number(e.target.value))}
+            value={contextLengthDisplay}
+            onChange={e => setContextLengthDisplay(Number(e.target.value))}
+            onPointerUp={e => onContextLengthChange(Number((e.target as HTMLInputElement).value))}
             disabled={disabled}
             className="w-full disabled:opacity-50 disabled:cursor-not-allowed"
           />
           <div className="text-xs text-gray-400 text-right mt-1">
-            {(save?.max_context_tokens ?? 8192).toLocaleString()} tokens
+            {contextLengthDisplay.toLocaleString()} tokens
           </div>
         </div>
 
