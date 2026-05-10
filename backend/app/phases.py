@@ -58,6 +58,8 @@ async def run_director(
     save: Save,
     scenario: Scenario,
     characters: dict[str, Character],
+    favored_character_ids: list[str] | None = None,
+    response_reserve: int = 1024,
     on_retry: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> DirectorResponse:
     """
@@ -77,7 +79,11 @@ async def run_director(
     schema = DirectorResponse.model_json_schema()
 
     async def call_director() -> dict:
-        messages = build_director_prompt(save, scenario, characters)
+        messages = build_director_prompt(
+            save, scenario, characters,
+            favored_character_ids=favored_character_ids,
+            response_reserve=response_reserve,
+        )
         return await structured_chat(OLLAMA_MODEL, messages, schema)
 
     async def on_retry_wrapped(reason: str) -> None:
@@ -117,6 +123,8 @@ async def run_director_draft(
     target_name: str,
     target_role: str,
     direction_note: Optional[str] = None,
+    response_reserve: int = 1024,
+    num_predict: int | None = None,
 ) -> str:
     """
     Phase 1.5: Director drafts an isolated scene brief for a single persona.
@@ -126,10 +134,11 @@ async def run_director_draft(
     target persona never sees the raw adventure log.
     """
     messages = build_director_draft_prompt(
-        save, scenario, characters, target_name, target_role, direction_note
+        save, scenario, characters, target_name, target_role, direction_note,
+        response_reserve=response_reserve,
     )
     tokens: list[str] = []
-    async for token in stream_chat(OLLAMA_MODEL, messages):
+    async for token in stream_chat(OLLAMA_MODEL, messages, num_predict=num_predict):
         tokens.append(token)
     draft = "".join(t for t in tokens if t is not None).strip()
     logger.debug(
@@ -246,6 +255,8 @@ async def run_phase2(
     scenario: Scenario,
     characters: dict[str, Character],
     director_response: DirectorResponse,
+    response_reserve: int = 1024,
+    num_predict: int | None = None,
     on_retry: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> AsyncGenerator[dict, None]:
     """
@@ -258,7 +269,7 @@ async def run_phase2(
     Tokens are emitted optimistically; frontend treats them as provisional until
     message_complete fires.
     """
-    return _phase2_gen(save, scenario, characters, director_response, on_retry)
+    return _phase2_gen(save, scenario, characters, director_response, response_reserve, num_predict, on_retry)
 
 
 async def _phase2_gen(
@@ -266,6 +277,8 @@ async def _phase2_gen(
     scenario: Scenario,
     characters: dict[str, Character],
     director_response: DirectorResponse,
+    response_reserve: int = 1024,
+    num_predict: int | None = None,
     on_retry: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> AsyncGenerator[dict, None]:
     dm_char = next(
@@ -299,6 +312,8 @@ async def _phase2_gen(
             target_name=dm_char.name,
             target_role="narrator",
             direction_note=director_response.direction_note or None,
+            response_reserve=response_reserve,
+            num_predict=num_predict,
         )
         dm_messages = build_dm_prompt(
             save, scenario, dm_char,
@@ -313,6 +328,7 @@ async def _phase2_gen(
             previous_content=_last_generated_content_for(dm_char.id),
             same_speaker_as_previous=True,
             on_retry=on_retry,
+            num_predict=num_predict,
         ):
             yield event
 
@@ -359,6 +375,8 @@ async def _phase2_gen(
             target_name=speaker.name,
             target_role="narrator",
             direction_note=director_response.direction_note or None,
+            response_reserve=response_reserve,
+            num_predict=num_predict,
         )
         speaker_messages = build_dm_prompt(
             save, scenario, speaker,
@@ -371,6 +389,8 @@ async def _phase2_gen(
             target_name=speaker.name,
             target_role="companion",
             direction_note=director_response.direction_note or None,
+            response_reserve=response_reserve,
+            num_predict=num_predict,
         )
         speaker_messages = build_character_prompt(
             speaker, scenario, save, save.user_name,
@@ -385,6 +405,7 @@ async def _phase2_gen(
         previous_content=_last_generated_content_for(speaker_id),
         same_speaker_as_previous=True,
         on_retry=on_retry,
+        num_predict=num_predict,
     ):
         yield event
 
@@ -418,6 +439,7 @@ async def _stream_speaker(
     same_speaker_as_previous: bool,
     on_retry: Optional[Callable[[str], Awaitable[None]]] = None,
     max_retries: int = 2,
+    num_predict: int | None = None,
 ) -> AsyncGenerator[dict, None]:
     """
     Stream a single speaker's response.
@@ -429,7 +451,7 @@ async def _stream_speaker(
     for attempt in range(max_retries + 1):
         buffer: list[str] = []
         try:
-            async for token in stream_chat(OLLAMA_MODEL, messages):
+            async for token in stream_chat(OLLAMA_MODEL, messages, num_predict=num_predict):
                 buffer.append(token)
                 yield {"event": "token", "character_id": character_id, "text": token}
         except (OllamaTimeoutError, OllamaUnreachableError):
@@ -510,6 +532,8 @@ async def run_phase3(
     scenario: Scenario,
     characters: dict[str, Character],
     direction_note: Optional[str] = None,
+    response_reserve: int = 1024,
+    num_predict: int | None = None,
     on_retry: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> tuple[list[str], str]:
     """
@@ -553,6 +577,8 @@ async def run_phase3(
         target_name=dm_char.name,
         target_role="options",
         direction_note=direction_note,
+        response_reserve=response_reserve,
+        num_predict=num_predict,
     )
 
     async def call_options() -> dict:

@@ -49,7 +49,7 @@ from app.variables import apply_variables
 
 logger = logging.getLogger(__name__)
 
-_RESPONSE_RESERVE = 1024
+_DEFAULT_RESPONSE_RESERVE = 1024
 _ENCODING = tiktoken.get_encoding("cl100k_base")
 
 # Ollama role mapping
@@ -234,6 +234,8 @@ def build_director_prompt(
     save: Save,
     scenario: Scenario,
     characters: dict[str, "Character"],
+    favored_character_ids: list[str] | None = None,
+    response_reserve: int = _DEFAULT_RESPONSE_RESERVE,
 ) -> list[dict[str, str]]:
     """
     Build the full Ollama messages list for the Director's routing call.
@@ -268,6 +270,23 @@ def build_director_prompt(
             "role": "system",
             "content": "Active characters:\n" + "\n".join(roster_lines),
         })
+
+    # 3b. Favored character hint (player preference for this turn)
+    if favored_character_ids:
+        favored_names = [
+            characters[cid].name
+            for cid in favored_character_ids
+            if cid in characters
+        ]
+        if favored_names:
+            names_str = ", ".join(favored_names)
+            prefix.append({
+                "role": "system",
+                "content": (
+                    f"The player has indicated a preference for hearing from: {names_str}. "
+                    "Consider biasing toward one of these characters this turn."
+                ),
+            })
 
     # 4. Beat roster (only if beats exist and not sandbox_mode)
     if scenario.beats and not save.sandbox_mode:
@@ -310,7 +329,7 @@ def build_director_prompt(
 
     # 7. Truncated shared chat (Director sees all messages including DM-only)
     prefix_tokens = _count_messages_tokens(prefix)
-    available_chat_tokens = save.max_context_tokens - prefix_tokens - _RESPONSE_RESERVE
+    available_chat_tokens = save.max_context_tokens - prefix_tokens - response_reserve
 
     logger.debug(
         "Director token budget: prefix=%d, available_chat=%d (save=%s)",
@@ -364,6 +383,7 @@ def build_director_draft_prompt(
     target_name: str,
     target_role: str,
     direction_note: Optional[str] = None,
+    response_reserve: int = _DEFAULT_RESPONSE_RESERVE,
 ) -> list[dict[str, str]]:
     """
     Build the Ollama messages list for a Director context-drafting call (Phase 1.5).
@@ -400,7 +420,7 @@ def build_director_draft_prompt(
 
     # 4. Truncated shared chat (Director sees all, including DM-only)
     prefix_tokens = _count_messages_tokens(prefix)
-    available_chat_tokens = save.max_context_tokens - prefix_tokens - _RESPONSE_RESERVE
+    available_chat_tokens = save.max_context_tokens - prefix_tokens - response_reserve
     chat = _build_truncated_chat(save, max_tokens=max(0, available_chat_tokens), strip_dm_only=False)
 
     # 5. Drafting instruction (always last)

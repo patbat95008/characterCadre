@@ -76,6 +76,10 @@ async def chat_turn(request: TurnRequest) -> StreamingResponse:
         raise HTTPException(404, f"Scenario {save.scenario_id} not found for save")
     characters = _load_active_characters(save)
 
+    favored_character_ids = request.favored_character_ids
+    response_reserve = request.response_reserve
+    num_predict = request.max_response_tokens
+
     async def generate():
         start_time = datetime.now(timezone.utc)
 
@@ -97,7 +101,10 @@ async def chat_turn(request: TurnRequest) -> StreamingResponse:
                 director_failures.append({"call": "director", "reason": reason})
 
             director_response = await run_director(
-                save, scenario, characters, on_retry=on_director_retry
+                save, scenario, characters,
+                favored_character_ids=favored_character_ids,
+                response_reserve=response_reserve,
+                on_retry=on_director_retry,
             )
 
             for evt in director_failures:
@@ -130,7 +137,11 @@ async def chat_turn(request: TurnRequest) -> StreamingResponse:
                 logger.info("ending reached (save=%s) — sandbox mode enabled", save.id)
 
             # ── Phase 2: stream DM + character ────────────────────────────────
-            phase2_gen = await run_phase2(save, scenario, characters, director_response)
+            phase2_gen = await run_phase2(
+                save, scenario, characters, director_response,
+                response_reserve=response_reserve,
+                num_predict=num_predict,
+            )
             async for event_dict in phase2_gen:
                 event_name = event_dict["event"]
                 payload = {k: v for k, v in event_dict.items() if k != "event"}
@@ -169,6 +180,8 @@ async def chat_turn(request: TurnRequest) -> StreamingResponse:
             options, options_context = await run_phase3(
                 save, scenario, characters,
                 direction_note=director_response.direction_note or None,
+                response_reserve=response_reserve,
+                num_predict=num_predict,
                 on_retry=on_options_retry,
             )
         except Exception as exc:
