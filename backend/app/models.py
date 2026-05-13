@@ -84,6 +84,7 @@ class TurnRequest(BaseModel):
     favored_character_ids: list[str] = []
     response_reserve: int = 1024
     max_response_tokens: Optional[int] = None
+    beat_advance: bool = False
 
 
 class DirectorResponse(BaseModel):

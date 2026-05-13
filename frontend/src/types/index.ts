@@ -116,8 +116,13 @@ export interface MessageCompleteEvent {
   character_id: string
 }
 
+export interface OptionItem {
+  text: string
+  advances_beat: boolean
+}
+
 export interface OptionsEvent {
-  options: string[]
+  options: OptionItem[]
 }
 
 export interface OptionsContextEvent {

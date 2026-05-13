@@ -1,6 +1,7 @@
 import type {
   Character,
   CharacterSummary,
+  OptionItem,
   Save,
   SaveSummaryRow,
   Scenario,
@@ -161,7 +162,7 @@ export const savesApi = {
     }).then(r => jsonOrThrow<Save>(r)),
 
   seedOptions: (id: string) =>
-    fetch(`/api/saves/${id}/seed-options`).then(r => jsonOrThrow<{ options: string[]; context: string }>(r)),
+    fetch(`/api/saves/${id}/seed-options`).then(r => jsonOrThrow<{ options: OptionItem[]; context: string }>(r)),
 }
 
 // ── Streaming chat ────────────────────────────────────────────────────────────

@@ -319,16 +319,23 @@ async def _mock_draft_stream(model, messages, **kwargs):
 class TestRunPhase3:
 
     async def test_returns_four_options(self):
-        raw = {"options": ["Wait.", "Run.", "Fight.", "Hide."]}
+        raw = {"options": [
+            {"text": "Wait.", "advances_beat": False},
+            {"text": "Run.", "advances_beat": False},
+            {"text": "Fight.", "advances_beat": True},
+            {"text": "Hide.", "advances_beat": False},
+        ]}
         with patch("app.phases.stream_chat", side_effect=_mock_draft_stream), \
              patch("app.phases.structured_chat", new=AsyncMock(return_value=raw)):
             options, context = await run_phase3(_fixture_save(), SCENARIO, CHARACTERS)
-        assert options == ["Wait.", "Run.", "Fight.", "Hide."]
+        assert len(options) == 4
+        assert options[0] == {"text": "Wait.", "advances_beat": False}
+        assert options[2] == {"text": "Fight.", "advances_beat": True}
         assert isinstance(context, str)
 
     async def test_falls_back_on_exhaustion(self):
         async def mock_structured(model, messages, schema, **kwargs):
-            return {"options": ["only one"]}  # always invalid
+            return {"options": [{"text": "only one", "advances_beat": False}]}  # always invalid
         with patch("app.phases.stream_chat", side_effect=_mock_draft_stream), \
              patch("app.phases.structured_chat", side_effect=mock_structured):
             options, _ = await run_phase3(_fixture_save(), SCENARIO, CHARACTERS)
@@ -342,11 +349,16 @@ class TestRunPhase3:
         assert context == ""
 
     async def test_accepts_direction_note_parameter(self):
-        raw = {"options": ["A.", "B.", "C.", "D."]}
+        raw = {"options": [
+            {"text": "A.", "advances_beat": False},
+            {"text": "B.", "advances_beat": False},
+            {"text": "C.", "advances_beat": False},
+            {"text": "D.", "advances_beat": False},
+        ]}
         with patch("app.phases.stream_chat", side_effect=_mock_draft_stream), \
              patch("app.phases.structured_chat", new=AsyncMock(return_value=raw)):
             options, _ = await run_phase3(_fixture_save(), SCENARIO, CHARACTERS, direction_note="The scene shifts.")
-        assert options == ["A.", "B.", "C.", "D."]
+        assert [o["text"] for o in options] == ["A.", "B.", "C.", "D."]
 
 
 # ── Full turn integration ─────────────────────────────────────────────────────
@@ -358,7 +370,12 @@ class TestFullTurnIntegration:
         initial_count = len(save.messages)
 
         director_raw = _valid_director_dict("bram")
-        options_raw = {"options": ["A", "B", "C", "D"]}
+        options_raw = {"options": [
+            {"text": "A", "advances_beat": False},
+            {"text": "B", "advances_beat": False},
+            {"text": "C", "advances_beat": False},
+            {"text": "D", "advances_beat": False},
+        ]}
 
         async def mock_structured(model, messages, schema, **kwargs):
             if "dm_should_narrate" in json.dumps(schema):
@@ -379,7 +396,7 @@ class TestFullTurnIntegration:
         assert bt is None  # no beats in fixture
         token_events = [e for e in events if e["event"] == "token"]
         assert len(token_events) >= 1
-        assert options == ["A", "B", "C", "D"]
+        assert [o["text"] for o in options] == ["A", "B", "C", "D"]
         assert len(save.messages) > initial_count
 
     async def test_two_beat_transition_flow(self):

@@ -42,11 +42,11 @@ DIRECTOR_FALLBACK = DirectorResponse(
     reasoning="",
 )
 
-OPTIONS_FALLBACK: list[str] = [
-    "Wait and observe.",
-    "Ask a question.",
-    "Take action.",
-    "Step back.",
+OPTIONS_FALLBACK: list[dict] = [
+    {"text": "Wait and observe.", "advances_beat": False},
+    {"text": "Ask a question.", "advances_beat": False},
+    {"text": "Take action.", "advances_beat": False},
+    {"text": "Step back.", "advances_beat": False},
 ]
 
 
@@ -108,9 +108,10 @@ OPTIONS_MIN = 2
 OPTIONS_MAX = 6
 
 
-def validate_options_response(raw: dict) -> Result[list[str]]:
+def validate_options_response(raw: dict) -> "Result[list[dict]]":
     """
-    Expects {"options": [...]} with OPTIONS_MIN..OPTIONS_MAX non-empty strings.
+    Expects {"options": [...]} where each item is {"text": str, "advances_beat": bool}.
+    Enforces OPTIONS_MIN..OPTIONS_MAX items and at most one advances_beat=True.
     """
     if not isinstance(raw, dict):
         return Err("response is not a dict")
@@ -123,12 +124,30 @@ def validate_options_response(raw: dict) -> Result[list[str]]:
         return Err(
             f"expected {OPTIONS_MIN}-{OPTIONS_MAX} options, got {len(options)}"
         )
+    advance_count = 0
+    result: list[dict] = []
     for i, opt in enumerate(options):
-        if not isinstance(opt, str):
-            return Err(f"option[{i}] is not a string")
-        if not opt.strip():
-            return Err(f"option[{i}] is empty")
-    return Ok(options)
+        if not isinstance(opt, dict):
+            return Err(f"option[{i}] is not an object")
+        text = opt.get("text")
+        advances_beat = opt.get("advances_beat")
+        if not isinstance(text, str) or not text.strip():
+            return Err(f"option[{i}].text is missing or empty")
+        if not isinstance(advances_beat, bool):
+            return Err(f"option[{i}].advances_beat is not a boolean")
+        if advances_beat:
+            advance_count += 1
+        result.append({"text": text, "advances_beat": advances_beat})
+    # Clamp: if LLM flagged more than one, strip extras
+    if advance_count > 1:
+        found = False
+        for item in result:
+            if item["advances_beat"]:
+                if found:
+                    item["advances_beat"] = False
+                else:
+                    found = True
+    return Ok(result)
 
 
 def validate_streamed_text(
