@@ -35,6 +35,7 @@ async def stream_chat(
     model: str,
     messages: list[dict[str, str]],
     options: dict[str, Any] | None = None,
+    num_predict: int | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     Async generator yielding token strings from an Ollama streaming chat call.
@@ -49,12 +50,15 @@ async def stream_chat(
     llm_logger.log_input("stream_chat", model, messages)
     _log_buf: list[str] = []
     client = _get_client()
+    effective_options: dict[str, Any] = dict(options or {})
+    if num_predict is not None:
+        effective_options["num_predict"] = num_predict
     try:
         stream = await client.chat(
             model=model,
             messages=messages,
             stream=True,
-            options=options or {},
+            options=effective_options,
         )
         aiter = stream.__aiter__()
         while True:

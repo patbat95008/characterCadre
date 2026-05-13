@@ -81,6 +81,9 @@ class TurnRequest(BaseModel):
 
     user_message: str
     save_id: str = "stage1"
+    favored_character_ids: list[str] = []
+    response_reserve: int = 1024
+    max_response_tokens: Optional[int] = None
 
 
 class DirectorResponse(BaseModel):

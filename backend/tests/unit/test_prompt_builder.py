@@ -309,6 +309,27 @@ class TestBuildDirectorPrompt:
         # Narrator's first response example
         assert "I push open the heavy oak door" not in content
 
+    def test_favored_character_hint_injected(self):
+        messages = build_director_prompt(
+            _fixture_save(), SCENARIO, CHARACTERS,
+            favored_character_ids=[BRAM.id],
+        )
+        content = _all_content(messages)
+        assert BRAM.name in content
+        assert "preference for hearing from" in content
+
+    def test_favored_hint_absent_when_empty(self):
+        content = _all_content(build_director_prompt(_fixture_save(), SCENARIO, CHARACTERS, favored_character_ids=[]))
+        assert "preference for hearing from" not in content
+
+    def test_response_reserve_affects_budget(self):
+        # With a very large reserve the chat portion shrinks to 0 — verify the function
+        # doesn't crash and still returns a usable messages list.
+        save = _fixture_save()
+        save.messages.append(_msg("user", "Hello!"))
+        messages = build_director_prompt(save, SCENARIO, CHARACTERS, response_reserve=8192)
+        assert len(messages) >= 2  # at least system + instruction
+
 
 # ── build_director_draft_prompt ───────────────────────────────────────────────
 

@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 
 import { avatarUrl, charactersApi, savesApi } from '../api/client'
 import MarkdownMessage from '../components/MarkdownMessage'
+import SettingsSidebar from '../components/SettingsSidebar'
 import { useStream } from '../hooks/useStream'
 import type {
   BeatTransitionEvent,
@@ -54,6 +55,11 @@ export default function Game() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editContent, setEditContent] = useState('')
   const [loadError, setLoadError] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [favoredCharacterIds, setFavoredCharacterIds] = useState<string[]>([])
+  const [persistFavored, setPersistFavored] = useState(false)
+  const [responseReserve, setResponseReserve] = useState(1024)
+  const [maxResponseTokens, setMaxResponseTokens] = useState<number | null>(null)
 
   const placeholdersRef = useRef<Record<string, string>>({})
   const dmNarratingRef = useRef(false)
@@ -156,9 +162,17 @@ export default function Game() {
     }
     setMessages(prev => [...prev, userMsg])
 
+    if (!persistFavored) setFavoredCharacterIds([])
+
     startStream(
       '/api/chat/turn',
-      { user_message: text, save_id: save.id },
+      {
+        user_message: text,
+        save_id: save.id,
+        favored_character_ids: favoredCharacterIds,
+        response_reserve: responseReserve,
+        max_response_tokens: maxResponseTokens,
+      },
       {
         onToken: (token, characterId) => {
           const charId = characterId ?? 'unknown'
@@ -298,6 +312,10 @@ export default function Game() {
     }
   }
 
+  const handleFavorChange = useCallback((id: string, checked: boolean) => {
+    setFavoredCharacterIds(prev => checked ? [...prev, id] : prev.filter(x => x !== id))
+  }, [])
+
   function startEdit(msg: Message) {
     if (isStreaming) return
     setEditingId(msg.id)
@@ -320,10 +338,39 @@ export default function Game() {
     .sort((a, b) => a.order - b.order) ?? []
 
   return (
-    <div className="flex flex-col h-screen bg-gray-950 text-gray-100">
+    <div className="flex flex-row h-screen bg-gray-950 text-gray-100">
+      {/* Settings Sidebar */}
+      <div className={`flex-shrink-0 transition-all duration-200 overflow-hidden ${sidebarOpen ? 'w-72' : 'w-0'}`}>
+        <SettingsSidebar
+          save={save}
+          characterIndex={characterIndex}
+          onContextLengthChange={setMaxTokens}
+          onSandboxChange={toggleSandbox}
+          responseReserve={responseReserve}
+          onResponseReserveChange={setResponseReserve}
+          maxResponseTokens={maxResponseTokens}
+          onMaxResponseTokensChange={setMaxResponseTokens}
+          favoredIds={favoredCharacterIds}
+          onFavorChange={handleFavorChange}
+          persistFavored={persistFavored}
+          onPersistFavoredChange={setPersistFavored}
+          isStreaming={isStreaming}
+        />
+      </div>
+
+      {/* Main content */}
+      <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
       {/* Header */}
       <div className="border-b border-gray-800 px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-3">
+          <button
+            onClick={() => setSidebarOpen(o => !o)}
+            className="text-gray-400 hover:text-gray-200 text-lg px-1 leading-none"
+            aria-label="Toggle settings"
+            title="Settings"
+          >
+            ☰
+          </button>
           <Link to="/" className="text-xs text-gray-500 hover:text-gray-200">← Menu</Link>
           <div>
             <h1 className="text-lg font-semibold text-gray-200">{save?.name ?? '…'}</h1>
@@ -368,31 +415,6 @@ export default function Game() {
                     </button>
                   </div>
                 ))}
-              </div>
-              <div className="border-t border-gray-800 pt-2">
-                <label className="flex items-center gap-2 text-xs text-gray-300">
-                  <input
-                    type="checkbox"
-                    checked={sandboxMode}
-                    onChange={toggleSandbox}
-                  />
-                  Sandbox mode (Director ignores beats)
-                </label>
-              </div>
-              <div className="border-t border-gray-800 pt-2">
-                <div className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">
-                  Max context tokens
-                </div>
-                <input
-                  type="range"
-                  min={2048}
-                  max={32_768}
-                  step={1024}
-                  value={save?.max_context_tokens ?? 8192}
-                  onChange={e => setMaxTokens(Number(e.target.value))}
-                  className="w-full"
-                />
-                <div className="text-xs text-gray-400 text-right">{save?.max_context_tokens}</div>
               </div>
             </div>
           )}
@@ -583,6 +605,7 @@ export default function Game() {
           </div>
         </div>
       )}
+      </div> {/* end main content */}
     </div>
   )
 }
