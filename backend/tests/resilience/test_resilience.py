@@ -103,17 +103,23 @@ class TestMalformedJSONFromOptions:
 
     async def test_malformed_options_retries_and_succeeds(self):
         calls = []
+        valid_options = [
+            {"text": "A", "advances_beat": False},
+            {"text": "B", "advances_beat": False},
+            {"text": "C", "advances_beat": False},
+            {"text": "D", "advances_beat": False},
+        ]
         async def mock_structured(model, messages, schema, **kwargs):
             calls.append(1)
             if len(calls) == 1:
-                return {"options": ["only one"]}  # invalid
-            return {"options": ["A", "B", "C", "D"]}
+                return {"options": ["only one"]}  # invalid (old string format)
+            return {"options": valid_options}
         async def mock_stream(model, messages, **kwargs):
             yield "The player stands ready."
         with patch("app.phases.stream_chat", side_effect=mock_stream), \
              patch("app.phases.structured_chat", side_effect=mock_structured):
             options, _ = await run_phase3(_fixture_save(), SCENARIO, CHARACTERS)
-        assert options == ["A", "B", "C", "D"]
+        assert [o["text"] for o in options] == ["A", "B", "C", "D"]
         assert len(calls) == 2
 
     async def test_options_all_retries_exhausted_uses_fallback(self):

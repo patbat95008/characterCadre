@@ -17,7 +17,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Optional
 
-from app.models import Character, DirectorResponse, Message, Save, Scenario
+from app.models import Beat, Character, DirectorResponse, Message, Save, Scenario
 from app.ollama_client import (
     OLLAMA_MODEL,
     OllamaTimeoutError,
@@ -43,13 +43,40 @@ from app.validation import (
 
 logger = logging.getLogger(__name__)
 
-# Instruction appended to DM prompt messages list for Phase 3 option drafting
-_OPTIONS_INSTRUCTION = (
-    "Based on the story so far, suggest exactly 4 short player actions or replies "
-    "(10 words or fewer each) that the player character might do or say next. "
-    "Vary the tone: one cautious, one bold, one curious, one witty. "
-    "Return JSON with an 'options' array of exactly 4 strings."
-)
+def _build_options_instruction(transition_condition: Optional[str]) -> str:
+    base = (
+        "Based on the story so far, suggest exactly 4 short player actions or replies "
+        "(10 words or fewer each) that the player character might do or say next. "
+        "Vary the tone: one cautious, one bold, one curious, one witty. "
+        "Return JSON with an 'options' array of exactly 4 objects. "
+        "Each object must have 'text' (the action string, 10 words or fewer) and "
+        "'advances_beat' (boolean). Set 'advances_beat' to false for all options "
+        "unless exactly one option would naturally satisfy the story beat's transition "
+        "condition. At most ONE option may have 'advances_beat': true."
+    )
+    if transition_condition:
+        return (
+            base
+            + f'\n\nCurrent beat transition condition: "{transition_condition}"\n'
+            "If one of the player options would clearly satisfy this condition, "
+            "set that option's 'advances_beat' to true. Otherwise leave all false."
+        )
+    return base
+
+
+def find_next_beat(save: Save, scenario: Scenario) -> Optional[Beat]:
+    """Return the next beat by order after the current one, or None if none exists."""
+    if not scenario.beats or not save.current_beat_id or save.sandbox_mode:
+        return None
+    beats_by_id = {b.id: b for b in scenario.beats}
+    current = beats_by_id.get(save.current_beat_id)
+    if not current:
+        return None
+    forward = sorted(
+        (b for b in scenario.beats if b.order > current.order),
+        key=lambda b: b.order,
+    )
+    return forward[0] if forward else None
 
 
 # ── Phase 1: Director ─────────────────────────────────────────────────────────
@@ -195,6 +222,7 @@ def apply_beat_transition(
     save: Save,
     scenario: Scenario,
     director_response: DirectorResponse,
+    trigger: str = "director",
 ) -> Optional[dict]:
     """
     If the Director signaled a valid forward beat transition:
@@ -240,10 +268,11 @@ def apply_beat_transition(
     save.messages.append(msg)
 
     logger.info(
-        "beat transition: %s -> %s (save=%s, trigger=director)",
+        "beat transition: %s -> %s (save=%s, trigger=%s)",
         old_beat_name,
         next_beat.name,
         save.id,
+        trigger,
     )
     return {"new_beat_id": next_beat.id, "new_beat_name": next_beat.name}
 
@@ -535,15 +564,15 @@ async def run_phase3(
     response_reserve: int = 1024,
     num_predict: int | None = None,
     on_retry: Optional[Callable[[str], Awaitable[None]]] = None,
-) -> tuple[list[str], str]:
+) -> tuple[list[dict], str]:
     """
     Phase 3: Generate 2-6 plausible player options using DM Prompt Assembly.
     The Director first drafts an options context brief; the DM then uses only
     its character card plus that brief (no raw adventure log).
     Falls back to OPTIONS_FALLBACK on exhaustion.
 
-    Returns (options, context_draft) — the context_draft is the director's
-    scene brief that informed the options; it may be empty on fallback paths.
+    Returns (options, context_draft) where each option is
+    {"text": str, "advances_beat": bool}. At most one may have advances_beat=True.
     """
     dm_char = next(
         (c for c in characters.values() if c.is_dm and c.id in save.active_character_ids),
@@ -553,6 +582,11 @@ async def run_phase3(
         logger.warning("Phase 3: no DM character found in active roster (save=%s)", save.id)
         return list(OPTIONS_FALLBACK), ""
 
+    # Determine if a beat advance is possible so the LLM can flag an option
+    next_beat = find_next_beat(save, scenario)
+    transition_condition = next_beat.transition_condition if next_beat else None
+    options_instruction = _build_options_instruction(transition_condition)
+
     options_schema = {
         "type": "object",
         "properties": {
@@ -560,7 +594,14 @@ async def run_phase3(
                 "type": "array",
                 "minItems": 2,
                 "maxItems": 6,
-                "items": {"type": "string"},
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                        "advances_beat": {"type": "boolean"},
+                    },
+                    "required": ["text", "advances_beat"],
+                },
             }
         },
         "required": ["options"],
@@ -587,7 +628,7 @@ async def run_phase3(
             context_draft=options_context,
             companion_names=companion_names,
         )
-        messages = base_messages + [{"role": "system", "content": _OPTIONS_INSTRUCTION}]
+        messages = base_messages + [{"role": "system", "content": options_instruction}]
         return await structured_chat(OLLAMA_MODEL, messages, options_schema)
 
     async def on_retry_wrapped(reason: str) -> None:

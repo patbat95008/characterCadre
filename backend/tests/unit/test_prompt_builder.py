@@ -252,8 +252,8 @@ class TestBuildDirectorPrompt:
         assert "(companion)" in content
 
     def test_beat_roster_omitted_when_no_beats(self):
-        assert SCENARIO.beats == []
-        content = _all_content(build_director_prompt(_fixture_save(), SCENARIO, CHARACTERS))
+        sc_no_beats = SCENARIO.model_copy(update={"beats": []})
+        content = _all_content(build_director_prompt(_fixture_save(), sc_no_beats, CHARACTERS))
         assert "[CURRENT]" not in content
 
     def test_beat_roster_omitted_in_sandbox_mode(self):

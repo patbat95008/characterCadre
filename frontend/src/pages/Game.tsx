@@ -11,6 +11,7 @@ import type {
   DirectorEvent,
   Message,
   MessageCompleteEvent,
+  OptionItem,
   OptionsContextEvent,
   OptionsEvent,
   Save,
@@ -41,7 +42,8 @@ export default function Game() {
   const [characterIndex, setCharacterIndex] = useState<Record<string, Character>>({})
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
-  const [options, setOptions] = useState<string[] | null>(null)
+  const [options, setOptions] = useState<OptionItem[] | null>(null)
+  const [beatAdvanceToggle, setBeatAdvanceToggle] = useState(false)
   const [optionsContext, setOptionsContext] = useState<string | null>(null)
   const [contextExpanded, setContextExpanded] = useState(false)
   const [currentBeatName, setCurrentBeatName] = useState<string | null>(null)
@@ -134,7 +136,7 @@ export default function Game() {
     return 'Character'
   }
 
-  const send = useCallback((overrideText?: string) => {
+  const send = useCallback((overrideText?: string, beatAdvance = false) => {
     if (!save) return
     const text = (overrideText ?? input).trim()
     if (!text || isStreaming) return
@@ -144,6 +146,7 @@ export default function Game() {
     setOptionsContext(null)
     setContextExpanded(false)
     setIsRegenerating(false)
+    setBeatAdvanceToggle(false)
 
     placeholdersRef.current = {}
     dmNarratingRef.current = false
@@ -172,6 +175,7 @@ export default function Game() {
         favored_character_ids: favoredCharacterIds,
         response_reserve: responseReserve,
         max_response_tokens: maxResponseTokens,
+        beat_advance: beatAdvance,
       },
       {
         onToken: (token, characterId) => {
@@ -266,7 +270,7 @@ export default function Game() {
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      send()
+      send(undefined, beatAdvanceToggle)
     }
   }
 
@@ -538,10 +542,14 @@ export default function Game() {
             {options.map((opt, i) => (
               <button
                 key={i}
-                onClick={() => send(opt)}
-                className="bg-gray-800 hover:bg-gray-700 text-gray-200 text-sm rounded px-3 py-2 text-left"
+                onClick={() => send(opt.text, opt.advances_beat)}
+                title={opt.advances_beat ? 'Advances story beat' : undefined}
+                className="bg-gray-800 hover:bg-gray-700 text-gray-200 text-sm rounded px-3 py-2 text-left flex items-center gap-2"
               >
-                {opt}
+                {opt.advances_beat && (
+                  <span className="shrink-0 w-2 h-2 rounded-full bg-yellow-400" />
+                )}
+                {opt.text}
               </button>
             ))}
           </div>
@@ -560,7 +568,15 @@ export default function Game() {
           className="flex-1 bg-gray-800 text-gray-100 placeholder-gray-500 rounded px-3 py-2 resize-none text-sm focus:outline-none focus:ring-1 focus:ring-blue-600 disabled:opacity-50"
         />
         <button
-          onClick={() => send()}
+          onClick={() => setBeatAdvanceToggle(v => !v)}
+          disabled={isStreaming}
+          title={beatAdvanceToggle ? 'Beat advance on — click to cancel' : 'Mark as story beat advance'}
+          className={`shrink-0 w-8 h-8 rounded-full flex items-center justify-center transition-colors ${beatAdvanceToggle ? 'bg-yellow-400 hover:bg-yellow-300' : 'bg-gray-700 hover:bg-gray-600'} disabled:opacity-40`}
+        >
+          <span className={`w-3 h-3 rounded-full ${beatAdvanceToggle ? 'bg-yellow-900' : 'bg-gray-500'}`} />
+        </button>
+        <button
+          onClick={() => send(undefined, beatAdvanceToggle)}
           disabled={isStreaming || !input.trim()}
           className="bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-white rounded px-4 py-2 text-sm font-medium"
         >

@@ -101,7 +101,8 @@ class TestValidateDirectorResponse:
     def test_beat_transition_no_beats_returns_err(self):
         raw = {**_valid_director_raw("bram"), "beat_transition": True, "next_beat_id": "b0"}
         save = _fixture_save()
-        result = validate_director_response(raw, SCENARIO, CHARACTERS, save)
+        sc_no_beats = SCENARIO.model_copy(update={"beats": []})
+        result = validate_director_response(raw, sc_no_beats, CHARACTERS, save)
         assert isinstance(result, Err)
         assert "no beats" in result.reason
 
@@ -146,47 +147,68 @@ class TestValidateDirectorResponse:
 
 # ── validate_options_response ─────────────────────────────────────────────────
 
+def _opt(text: str, advances_beat: bool = False) -> dict:
+    return {"text": text, "advances_beat": advances_beat}
+
+
 class TestValidateOptionsResponse:
 
     def test_valid_four_options_ok(self):
-        raw = {"options": ["A", "B", "C", "D"]}
+        raw = {"options": [_opt("A"), _opt("B"), _opt("C"), _opt("D", True)]}
         result = validate_options_response(raw)
         assert isinstance(result, Ok)
-        assert result.value == ["A", "B", "C", "D"]
+        assert [o["text"] for o in result.value] == ["A", "B", "C", "D"]
+        assert result.value[3]["advances_beat"] is True
 
     def test_counts_in_range_ok(self):
         for n in (2, 3, 4, 5, 6):
-            raw = {"options": [f"opt{i}" for i in range(n)]}
+            raw = {"options": [_opt(f"opt{i}") for i in range(n)]}
             assert isinstance(validate_options_response(raw), Ok), f"len={n} should be Ok"
 
     def test_wrong_count_returns_err(self):
-        # too few
         assert isinstance(validate_options_response({"options": []}), Err)
-        assert isinstance(validate_options_response({"options": ["A"]}), Err)
-        # too many
+        assert isinstance(validate_options_response({"options": [_opt("A")]}), Err)
         assert isinstance(
-            validate_options_response({"options": [f"o{i}" for i in range(7)]}), Err
+            validate_options_response({"options": [_opt(f"o{i}") for i in range(7)]}), Err
         )
 
     def test_empty_string_in_options_returns_err(self):
-        result = validate_options_response({"options": ["A", "", "C", "D"]})
+        result = validate_options_response({"options": [_opt("A"), _opt(""), _opt("C"), _opt("D")]})
         assert isinstance(result, Err)
         assert "empty" in result.reason
 
     def test_missing_options_key_returns_err(self):
-        result = validate_options_response({"choices": ["A", "B", "C", "D"]})
+        result = validate_options_response({"choices": [_opt("A"), _opt("B"), _opt("C"), _opt("D")]})
         assert isinstance(result, Err)
 
     def test_non_dict_returns_err(self):
         result = validate_options_response(["A", "B", "C", "D"])  # type: ignore[arg-type]
         assert isinstance(result, Err)
 
-    def test_non_string_item_returns_err(self):
-        result = validate_options_response({"options": ["A", 2, "C", "D"]})
+    def test_non_object_item_returns_err(self):
+        result = validate_options_response({"options": ["A", "B", "C", "D"]})
         assert isinstance(result, Err)
+        assert "not an object" in result.reason
 
-    def test_whitespace_only_string_returns_err(self):
-        result = validate_options_response({"options": ["A", "   ", "C", "D"]})
+    def test_missing_text_field_returns_err(self):
+        result = validate_options_response({"options": [{"advances_beat": False}, _opt("B"), _opt("C"), _opt("D")]})
+        assert isinstance(result, Err)
+        assert "text" in result.reason
+
+    def test_non_bool_advances_beat_returns_err(self):
+        result = validate_options_response({"options": [{"text": "A", "advances_beat": "yes"}, _opt("B"), _opt("C"), _opt("D")]})
+        assert isinstance(result, Err)
+        assert "advances_beat" in result.reason
+
+    def test_multiple_advances_beat_clamped_to_one(self):
+        raw = {"options": [_opt("A", True), _opt("B", True), _opt("C"), _opt("D")]}
+        result = validate_options_response(raw)
+        assert isinstance(result, Ok)
+        advance_count = sum(1 for o in result.value if o["advances_beat"])
+        assert advance_count == 1
+
+    def test_whitespace_only_text_returns_err(self):
+        result = validate_options_response({"options": [_opt("A"), _opt("   "), _opt("C"), _opt("D")]})
         assert isinstance(result, Err)
 
 
@@ -292,9 +314,9 @@ class TestWithValidation:
             async def call_fn():
                 nonlocal call_count
                 call_count += 1
-                return {"options": ["A", "B", "C", "D"]}
+                return {"options": [_opt("A"), _opt("B"), _opt("C"), _opt("D")]}
             result = await with_validation(call_fn, validate_options_response)
-            assert result == ["A", "B", "C", "D"]
+            assert [o["text"] for o in result] == ["A", "B", "C", "D"]
             assert call_count == 1
         asyncio.get_event_loop().run_until_complete(run())
 
@@ -304,10 +326,10 @@ class TestWithValidation:
             async def call_fn():
                 attempts.append(1)
                 if len(attempts) == 1:
-                    return {"options": ["A"]}  # invalid
-                return {"options": ["A", "B", "C", "D"]}  # valid on retry
+                    return {"options": [_opt("A")]}  # invalid (count too low)
+                return {"options": [_opt("A"), _opt("B"), _opt("C"), _opt("D")]}
             result = await with_validation(call_fn, validate_options_response)
-            assert result == ["A", "B", "C", "D"]
+            assert [o["text"] for o in result] == ["A", "B", "C", "D"]
             assert len(attempts) == 2
         asyncio.get_event_loop().run_until_complete(run())
 

@@ -24,6 +24,7 @@ from app.models import Character, Message, TurnRequest
 from app.ollama_client import OllamaTimeoutError, OllamaUnreachableError
 from app.phases import (
     apply_beat_transition,
+    find_next_beat,
     is_final_beat_completion,
     run_director,
     run_phase2,
@@ -126,9 +127,27 @@ async def chat_turn(request: TurnRequest) -> StreamingResponse:
                 "direction_note": director_response.direction_note,
             })
 
+            # ── Player-driven beat advance (overrides Director's beat decision) ─
+            beat_trigger = "director"
+            if request.beat_advance and not save.sandbox_mode:
+                next_beat = find_next_beat(save, scenario)
+                if next_beat:
+                    director_response.beat_transition = True
+                    director_response.next_beat_id = next_beat.id
+                    beat_trigger = "player"
+                    logger.info(
+                        "player-triggered beat advance to '%s' (save=%s)",
+                        next_beat.name, save.id,
+                    )
+                elif save.current_beat_id and scenario.beats:
+                    # Player is on the final beat — signal ending
+                    director_response.beat_transition = True
+                    director_response.next_beat_id = None
+                    beat_trigger = "player"
+
             # ── Beat transition + ending detection ────────────────────────────
             ending = is_final_beat_completion(save, scenario, director_response)
-            beat_data = apply_beat_transition(save, scenario, director_response)
+            beat_data = apply_beat_transition(save, scenario, director_response, trigger=beat_trigger)
             if beat_data:
                 yield _sse("beat_transition", beat_data)
             if ending:
