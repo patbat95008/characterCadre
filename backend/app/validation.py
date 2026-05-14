@@ -43,11 +43,14 @@ DIRECTOR_FALLBACK = DirectorResponse(
 )
 
 OPTIONS_FALLBACK: list[dict] = [
-    {"text": "Wait and observe.", "advances_beat": False},
-    {"text": "Ask a question.", "advances_beat": False},
-    {"text": "Take action.", "advances_beat": False},
-    {"text": "Step back.", "advances_beat": False},
+    {"text": "Wait and observe.", "advances_beat": False, "dice_roll": None},
+    {"text": "Ask a question.", "advances_beat": False, "dice_roll": None},
+    {"text": "Take action.", "advances_beat": False, "dice_roll": None},
+    {"text": "Step back.", "advances_beat": False, "dice_roll": None},
 ]
+
+_VALID_DICE = {"D20", "D100"}
+_VALID_DIFFICULTIES = {"Easy", "Medium", "Hard"}
 
 
 # ── Validators ────────────────────────────────────────────────────────────────
@@ -110,8 +113,10 @@ OPTIONS_MAX = 6
 
 def validate_options_response(raw: dict) -> "Result[list[dict]]":
     """
-    Expects {"options": [...]} where each item is {"text": str, "advances_beat": bool}.
-    Enforces OPTIONS_MIN..OPTIONS_MAX items and at most one advances_beat=True.
+    Expects {"options": [...]} where each item is:
+      {"text": str, "advances_beat": bool, "dice_roll": null | {"dice": .., "difficulty": ..}}
+    Enforces OPTIONS_MIN..OPTIONS_MAX items, at most one advances_beat=True,
+    and at most one non-null dice_roll.
     """
     if not isinstance(raw, dict):
         return Err("response is not a dict")
@@ -125,20 +130,42 @@ def validate_options_response(raw: dict) -> "Result[list[dict]]":
             f"expected {OPTIONS_MIN}-{OPTIONS_MAX} options, got {len(options)}"
         )
     advance_count = 0
+    dice_count = 0
     result: list[dict] = []
     for i, opt in enumerate(options):
         if not isinstance(opt, dict):
             return Err(f"option[{i}] is not an object")
         text = opt.get("text")
         advances_beat = opt.get("advances_beat")
+        dice_roll = opt.get("dice_roll")
         if not isinstance(text, str) or not text.strip():
             return Err(f"option[{i}].text is missing or empty")
         if not isinstance(advances_beat, bool):
             return Err(f"option[{i}].advances_beat is not a boolean")
+        # Validate dice_roll: must be absent, null, or a valid spec object
+        validated_dice: dict | None = None
+        if dice_roll is not None:
+            if not isinstance(dice_roll, dict):
+                return Err(f"option[{i}].dice_roll is not an object or null")
+            dice_val = dice_roll.get("dice")
+            diff_val = dice_roll.get("difficulty")
+            if dice_val not in _VALID_DICE:
+                return Err(
+                    f"option[{i}].dice_roll.dice '{dice_val}' is not valid "
+                    f"(must be one of {sorted(_VALID_DICE)})"
+                )
+            if diff_val not in _VALID_DIFFICULTIES:
+                return Err(
+                    f"option[{i}].dice_roll.difficulty '{diff_val}' is not valid "
+                    f"(must be one of {sorted(_VALID_DIFFICULTIES)})"
+                )
+            validated_dice = {"dice": dice_val, "difficulty": diff_val}
+            dice_count += 1
         if advances_beat:
             advance_count += 1
-        result.append({"text": text, "advances_beat": advances_beat})
-    # Clamp: if LLM flagged more than one, strip extras
+        result.append({"text": text, "advances_beat": advances_beat, "dice_roll": validated_dice})
+
+    # Clamp: if LLM flagged more than one advances_beat, strip extras
     if advance_count > 1:
         found = False
         for item in result:
@@ -147,6 +174,17 @@ def validate_options_response(raw: dict) -> "Result[list[dict]]":
                     item["advances_beat"] = False
                 else:
                     found = True
+
+    # Clamp: if LLM flagged more than one dice_roll, strip extras
+    if dice_count > 1:
+        found = False
+        for item in result:
+            if item["dice_roll"] is not None:
+                if found:
+                    item["dice_roll"] = None
+                else:
+                    found = True
+
     return Ok(result)
 
 

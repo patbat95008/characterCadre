@@ -49,10 +49,17 @@ def _build_options_instruction(transition_condition: Optional[str]) -> str:
         "(10 words or fewer each) that the player character might do or say next. "
         "Vary the tone: one cautious, one bold, one curious, one witty. "
         "Return JSON with an 'options' array of exactly 4 objects. "
-        "Each object must have 'text' (the action string, 10 words or fewer) and "
-        "'advances_beat' (boolean). Set 'advances_beat' to false for all options "
-        "unless exactly one option would naturally satisfy the story beat's transition "
-        "condition. At most ONE option may have 'advances_beat': true."
+        "Each object must have:\n"
+        "  'text' (the action string, 10 words or fewer)\n"
+        "  'advances_beat' (boolean) — true for at most ONE option that would "
+        "naturally satisfy the story beat's transition condition; false otherwise\n"
+        "  'dice_roll' — either null, or an object {\"dice\": \"D20\"|\"D100\", "
+        "\"difficulty\": \"Easy\"|\"Medium\"|\"Hard\"} when the action warrants a "
+        "skill check. Use D20 for most checks; D100 for luck or fate-based outcomes. "
+        "At most ONE option may have a non-null dice_roll. "
+        "dice_roll and advances_beat may coexist on the same option (success advances "
+        "the beat, failure does not). Only add dice_roll when the action is genuinely "
+        "risky or uncertain — not for simple dialogue or safe actions."
     )
     if transition_condition:
         return (
@@ -572,7 +579,8 @@ async def run_phase3(
     Falls back to OPTIONS_FALLBACK on exhaustion.
 
     Returns (options, context_draft) where each option is
-    {"text": str, "advances_beat": bool}. At most one may have advances_beat=True.
+    {"text": str, "advances_beat": bool, "dice_roll": {"dice":..,"difficulty":..}|None}.
+    At most one may have advances_beat=True; at most one may have a non-null dice_roll.
     """
     dm_char = next(
         (c for c in characters.values() if c.is_dm and c.id in save.active_character_ids),
@@ -587,6 +595,20 @@ async def run_phase3(
     transition_condition = next_beat.transition_condition if next_beat else None
     options_instruction = _build_options_instruction(transition_condition)
 
+    _dice_roll_schema = {
+        "oneOf": [
+            {"type": "null"},
+            {
+                "type": "object",
+                "properties": {
+                    "dice": {"type": "string", "enum": ["D20", "D100"]},
+                    "difficulty": {"type": "string", "enum": ["Easy", "Medium", "Hard"]},
+                },
+                "required": ["dice", "difficulty"],
+            },
+        ]
+    }
+
     options_schema = {
         "type": "object",
         "properties": {
@@ -599,8 +621,9 @@ async def run_phase3(
                     "properties": {
                         "text": {"type": "string"},
                         "advances_beat": {"type": "boolean"},
+                        "dice_roll": _dice_roll_schema,
                     },
-                    "required": ["text", "advances_beat"],
+                    "required": ["text", "advances_beat", "dice_roll"],
                 },
             }
         },

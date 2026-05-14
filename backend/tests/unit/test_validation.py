@@ -147,8 +147,8 @@ class TestValidateDirectorResponse:
 
 # ── validate_options_response ─────────────────────────────────────────────────
 
-def _opt(text: str, advances_beat: bool = False) -> dict:
-    return {"text": text, "advances_beat": advances_beat}
+def _opt(text: str, advances_beat: bool = False, dice_roll: dict | None = None) -> dict:
+    return {"text": text, "advances_beat": advances_beat, "dice_roll": dice_roll}
 
 
 class TestValidateOptionsResponse:

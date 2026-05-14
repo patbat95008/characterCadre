@@ -8,12 +8,14 @@ import { useStream } from '../hooks/useStream'
 import type {
   BeatTransitionEvent,
   Character,
+  DiceSpec,
   DirectorEvent,
   Message,
   MessageCompleteEvent,
   OptionItem,
   OptionsContextEvent,
   OptionsEvent,
+  RollResultEvent,
   Save,
   Scenario,
   ValidationFailedEvent,
@@ -136,7 +138,7 @@ export default function Game() {
     return 'Character'
   }
 
-  const send = useCallback((overrideText?: string, beatAdvance = false) => {
+  const send = useCallback((overrideText?: string, beatAdvance = false, diceRoll: DiceSpec | null = null) => {
     if (!save) return
     const text = (overrideText ?? input).trim()
     if (!text || isStreaming) return
@@ -176,6 +178,7 @@ export default function Game() {
         response_reserve: responseReserve,
         max_response_tokens: maxResponseTokens,
         beat_advance: beatAdvance,
+        dice_roll: diceRoll,
       },
       {
         onToken: (token, characterId) => {
@@ -262,6 +265,19 @@ export default function Game() {
         },
         onNotice: (event) => {
           showToast(event.message, event.level === 'error' ? 'error' : 'warning')
+        },
+        onRollResult: (event: RollResultEvent) => {
+          const rollMsg: Message = {
+            id: `roll-${Date.now()}`,
+            role: 'roll',
+            character_id: null,
+            content: '',
+            timestamp: new Date().toISOString(),
+            is_dm_only: false,
+            beat_id_at_time: save.current_beat_id,
+            roll_data: event,
+          }
+          setMessages(prev => [...prev, rollMsg])
         },
       },
     )
@@ -441,6 +457,35 @@ export default function Game() {
           const character = msg.character_id ? characterIndex[msg.character_id] : null
           const avatarSrc = character?.avatar_path ? avatarUrl(character.avatar_path) : null
 
+          if (msg.role === 'roll' && msg.roll_data) {
+            const r = msg.roll_data
+            const isSuccess = r.outcome === 'success' || r.outcome === 'critical_success'
+            const outcomeLabel: Record<string, string> = {
+              critical_failure: 'Critical Failure',
+              failure: 'Failure',
+              success: 'Success',
+              critical_success: 'Critical Success',
+            }
+            return (
+              <div key={msg.id} className="flex justify-center">
+                <div className={`rounded-lg px-4 py-3 text-sm border ${isSuccess ? 'border-green-700 bg-green-950 text-green-200' : 'border-red-800 bg-red-950 text-red-200'} w-full max-w-sm`}>
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="font-semibold">{r.dice}</span>
+                    <span className="text-2xl font-bold">{r.value}</span>
+                    <span className="text-xs text-gray-400">/ {r.max_value} (need {r.threshold})</span>
+                    <span className="font-semibold">{outcomeLabel[r.outcome] ?? r.outcome}</span>
+                  </div>
+                  {r.is_nat_crit && (
+                    <div className="mt-1 text-xs text-center text-yellow-400">
+                      {isSuccess ? '★ Natural Critical Success' : '★ Natural Critical Failure'}
+                    </div>
+                  )}
+                  <div className="mt-1 text-xs text-gray-400 text-center">{r.difficulty} difficulty</div>
+                </div>
+              </div>
+            )
+          }
+
           return (
             <div key={msg.id} className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
               {!isUser && (
@@ -542,14 +587,19 @@ export default function Game() {
             {options.map((opt, i) => (
               <button
                 key={i}
-                onClick={() => send(opt.text, opt.advances_beat)}
+                onClick={() => send(opt.text, opt.advances_beat, opt.dice_roll)}
                 title={opt.advances_beat ? 'Advances story beat' : undefined}
                 className="bg-gray-800 hover:bg-gray-700 text-gray-200 text-sm rounded px-3 py-2 text-left flex items-center gap-2"
               >
                 {opt.advances_beat && (
                   <span className="shrink-0 w-2 h-2 rounded-full bg-yellow-400" />
                 )}
-                {opt.text}
+                <span className="flex-1">{opt.text}</span>
+                {opt.dice_roll && (
+                  <span className="shrink-0 text-[10px] text-gray-400 bg-gray-700 px-1.5 py-0.5 rounded-full">
+                    {opt.dice_roll.dice} · {opt.dice_roll.difficulty}
+                  </span>
+                )}
               </button>
             ))}
           </div>

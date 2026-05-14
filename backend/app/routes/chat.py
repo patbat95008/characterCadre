@@ -19,7 +19,8 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
-from app import storage
+from app import dice, storage
+from app.dice import DiceResult
 from app.models import Character, Message, TurnRequest
 from app.ollama_client import OllamaTimeoutError, OllamaUnreachableError
 from app.phases import (
@@ -41,6 +42,16 @@ def _sse(event: str, data: dict | str) -> str:
     return f"event: {event}\ndata: {payload}\n\n"
 
 
+def _rollback_messages(save, dice_result: "DiceResult | None") -> None:
+    """Remove the user message (and dice context message if present) on error."""
+    # Pop the dice context message first (it was appended after the user message)
+    if dice_result is not None and save.messages:
+        save.messages.pop()
+    # Pop the user message
+    if save.messages:
+        save.messages.pop()
+
+
 def _load_active_characters(save) -> dict[str, Character]:
     """Return a {id: Character} map for every active character in the save."""
     out: dict[str, Character] = {}
@@ -57,6 +68,7 @@ def _load_active_characters(save) -> dict[str, Character]:
 async def chat_turn(request: TurnRequest) -> StreamingResponse:
     """
     Multi-phase turn endpoint. SSE events emitted (in order):
+      event: roll_result        data: {dice,value,max_value,threshold,difficulty,outcome,is_nat_crit}  (if dice roll)
       event: director           data: {speaker_id, dm_narrating, direction_note}
       event: beat_transition    data: {new_beat_id, new_beat_name}      (if transition)
       event: ending_reached     data: {}                                 (if final beat done)
@@ -94,6 +106,35 @@ async def chat_turn(request: TurnRequest) -> StreamingResponse:
         )
         save.messages.append(user_msg)
 
+        # ── Dice roll resolution (before Phase 1 so the Director sees the result) ──
+        dice_result: DiceResult | None = None
+        if request.dice_roll and not save.sandbox_mode:
+            dice_result = dice.roll_dice(
+                request.dice_roll.dice, request.dice_roll.difficulty
+            )
+            logger.info(
+                "dice roll (save=%s): %s %s → %d/%d — %s",
+                save.id,
+                dice_result.dice,
+                dice_result.difficulty,
+                dice_result.value,
+                dice_result.max_value,
+                dice_result.outcome,
+            )
+            # Emit roll result to frontend immediately
+            yield _sse("roll_result", dice_result.model_dump())
+            # Inject context message so the Director and DM narrate around the outcome
+            roll_context_msg = Message(
+                id=str(uuid.uuid4()),
+                role="dm",
+                character_id=None,
+                content=dice.build_llm_context_message(request.user_message, dice_result),
+                timestamp=start_time.isoformat(),
+                is_dm_only=True,
+                beat_id_at_time=save.current_beat_id,
+            )
+            save.messages.append(roll_context_msg)
+
         try:
             # ── Phase 1: Director ─────────────────────────────────────────────
             director_failures: list[dict] = []
@@ -128,8 +169,13 @@ async def chat_turn(request: TurnRequest) -> StreamingResponse:
             })
 
             # ── Player-driven beat advance (overrides Director's beat decision) ─
+            # If this was a dice roll, beat advance is only eligible on success/crit success
+            beat_advance_eligible = request.beat_advance and (
+                dice_result is None or dice.outcome_is_success(dice_result.outcome)
+            )
+
             beat_trigger = "director"
-            if request.beat_advance and not save.sandbox_mode:
+            if beat_advance_eligible and not save.sandbox_mode:
                 next_beat = find_next_beat(save, scenario)
                 if next_beat:
                     director_response.beat_transition = True
@@ -169,19 +215,19 @@ async def chat_turn(request: TurnRequest) -> StreamingResponse:
         except OllamaUnreachableError as exc:
             logger.warning("Ollama unreachable during turn (save=%s): %s", save.id, exc)
             yield _sse("error", {"reason": "ollama_unreachable"})
-            save.messages.pop()
+            _rollback_messages(save, dice_result)
             return
         except OllamaTimeoutError as exc:
             logger.warning("Ollama timeout during turn (save=%s): %s", save.id, exc)
             yield _sse("error", {"reason": "ollama_timeout"})
-            save.messages.pop()
+            _rollback_messages(save, dice_result)
             return
         except Exception as exc:
             logger.error(
                 "Unhandled error during turn (save=%s): %s", save.id, exc, exc_info=True
             )
             yield _sse("error", {"reason": "internal_error"})
-            save.messages.pop()
+            _rollback_messages(save, dice_result)
             return
 
         storage.save_save(save)

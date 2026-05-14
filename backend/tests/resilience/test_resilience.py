@@ -104,10 +104,10 @@ class TestMalformedJSONFromOptions:
     async def test_malformed_options_retries_and_succeeds(self):
         calls = []
         valid_options = [
-            {"text": "A", "advances_beat": False},
-            {"text": "B", "advances_beat": False},
-            {"text": "C", "advances_beat": False},
-            {"text": "D", "advances_beat": False},
+            {"text": "A", "advances_beat": False, "dice_roll": None},
+            {"text": "B", "advances_beat": False, "dice_roll": None},
+            {"text": "C", "advances_beat": False, "dice_roll": None},
+            {"text": "D", "advances_beat": False, "dice_roll": None},
         ]
         async def mock_structured(model, messages, schema, **kwargs):
             calls.append(1)

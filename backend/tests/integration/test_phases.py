@@ -320,22 +320,22 @@ class TestRunPhase3:
 
     async def test_returns_four_options(self):
         raw = {"options": [
-            {"text": "Wait.", "advances_beat": False},
-            {"text": "Run.", "advances_beat": False},
-            {"text": "Fight.", "advances_beat": True},
-            {"text": "Hide.", "advances_beat": False},
+            {"text": "Wait.", "advances_beat": False, "dice_roll": None},
+            {"text": "Run.", "advances_beat": False, "dice_roll": None},
+            {"text": "Fight.", "advances_beat": True, "dice_roll": None},
+            {"text": "Hide.", "advances_beat": False, "dice_roll": None},
         ]}
         with patch("app.phases.stream_chat", side_effect=_mock_draft_stream), \
              patch("app.phases.structured_chat", new=AsyncMock(return_value=raw)):
             options, context = await run_phase3(_fixture_save(), SCENARIO, CHARACTERS)
         assert len(options) == 4
-        assert options[0] == {"text": "Wait.", "advances_beat": False}
-        assert options[2] == {"text": "Fight.", "advances_beat": True}
+        assert options[0] == {"text": "Wait.", "advances_beat": False, "dice_roll": None}
+        assert options[2] == {"text": "Fight.", "advances_beat": True, "dice_roll": None}
         assert isinstance(context, str)
 
     async def test_falls_back_on_exhaustion(self):
         async def mock_structured(model, messages, schema, **kwargs):
-            return {"options": [{"text": "only one", "advances_beat": False}]}  # always invalid
+            return {"options": [{"text": "only one", "advances_beat": False, "dice_roll": None}]}  # always invalid
         with patch("app.phases.stream_chat", side_effect=_mock_draft_stream), \
              patch("app.phases.structured_chat", side_effect=mock_structured):
             options, _ = await run_phase3(_fixture_save(), SCENARIO, CHARACTERS)
@@ -350,10 +350,10 @@ class TestRunPhase3:
 
     async def test_accepts_direction_note_parameter(self):
         raw = {"options": [
-            {"text": "A.", "advances_beat": False},
-            {"text": "B.", "advances_beat": False},
-            {"text": "C.", "advances_beat": False},
-            {"text": "D.", "advances_beat": False},
+            {"text": "A.", "advances_beat": False, "dice_roll": None},
+            {"text": "B.", "advances_beat": False, "dice_roll": None},
+            {"text": "C.", "advances_beat": False, "dice_roll": None},
+            {"text": "D.", "advances_beat": False, "dice_roll": None},
         ]}
         with patch("app.phases.stream_chat", side_effect=_mock_draft_stream), \
              patch("app.phases.structured_chat", new=AsyncMock(return_value=raw)):
@@ -371,10 +371,10 @@ class TestFullTurnIntegration:
 
         director_raw = _valid_director_dict("bram")
         options_raw = {"options": [
-            {"text": "A", "advances_beat": False},
-            {"text": "B", "advances_beat": False},
-            {"text": "C", "advances_beat": False},
-            {"text": "D", "advances_beat": False},
+            {"text": "A", "advances_beat": False, "dice_roll": None},
+            {"text": "B", "advances_beat": False, "dice_roll": None},
+            {"text": "C", "advances_beat": False, "dice_roll": None},
+            {"text": "D", "advances_beat": False, "dice_roll": None},
         ]}
 
         async def mock_structured(model, messages, schema, **kwargs):

@@ -2,12 +2,15 @@
 
 export interface Message {
   id: string
-  role: 'user' | 'character' | 'dm'
+  /** 'roll' is frontend-only — never stored in the backend save */
+  role: 'user' | 'character' | 'dm' | 'roll'
   character_id: string | null
   content: string
   timestamp: string
   is_dm_only: boolean
   beat_id_at_time: string | null
+  /** Only present when role === 'roll' */
+  roll_data?: RollResultEvent
 }
 
 export interface Character {
@@ -116,13 +119,31 @@ export interface MessageCompleteEvent {
   character_id: string
 }
 
+export interface DiceSpec {
+  dice: 'D20' | 'D100'
+  difficulty: 'Easy' | 'Medium' | 'Hard'
+}
+
 export interface OptionItem {
   text: string
   advances_beat: boolean
+  dice_roll: DiceSpec | null
 }
 
 export interface OptionsEvent {
   options: OptionItem[]
+}
+
+export type RollOutcome = 'critical_failure' | 'failure' | 'success' | 'critical_success'
+
+export interface RollResultEvent {
+  dice: string
+  value: number
+  max_value: number
+  threshold: number
+  difficulty: string
+  outcome: RollOutcome
+  is_nat_crit: boolean
 }
 
 export interface OptionsContextEvent {

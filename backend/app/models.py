@@ -76,6 +76,14 @@ class Save(BaseModel):
 
 # ── Route I/O models ──────────────────────────────────────────────────────────
 
+class DiceSpec(BaseModel):
+    """Dice roll specification embedded in a player option or turn request."""
+    model_config = ConfigDict(extra="forbid")
+
+    dice: Literal["D20", "D100"]
+    difficulty: Literal["Easy", "Medium", "Hard"]
+
+
 class TurnRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -85,6 +93,7 @@ class TurnRequest(BaseModel):
     response_reserve: int = 1024
     max_response_tokens: Optional[int] = None
     beat_advance: bool = False
+    dice_roll: Optional[DiceSpec] = None
 
 
 class DirectorResponse(BaseModel):

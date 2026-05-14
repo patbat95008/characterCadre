@@ -8,6 +8,7 @@ import type {
   OptionsContextEvent,
   OptionsEvent,
   RegenerateEvent,
+  RollResultEvent,
   TokenEvent,
   ValidationFailedEvent,
   ValidationWarningEvent,
@@ -29,6 +30,7 @@ interface StreamCallbacks {
   onValidationFailed?: (event: ValidationFailedEvent) => void
   onEndingReached?: () => void
   onNotice?: (event: NoticeEvent) => void
+  onRollResult?: (event: RollResultEvent) => void
 }
 
 export function useStream() {
@@ -160,6 +162,12 @@ export function useStream() {
               const parsed = JSON.parse(data) as NoticeEvent
               console.log('[sse:notice]', parsed)
               callbacks.onNotice(parsed)
+            } catch { /* ignore */ }
+          } else if (eventType === 'roll_result' && callbacks.onRollResult) {
+            try {
+              const parsed = JSON.parse(data) as RollResultEvent
+              console.log('[sse:roll_result]', parsed)
+              callbacks.onRollResult(parsed)
             } catch { /* ignore */ }
           }
         }
