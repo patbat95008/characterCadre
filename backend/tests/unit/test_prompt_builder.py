@@ -263,6 +263,141 @@ class TestBuildDirectorPrompt:
         content = _all_content(build_director_prompt(save, sc, CHARACTERS))
         assert "[CURRENT]" not in content
 
+    def test_beat_rule_omitted_when_there_is_no_roster(self):
+        # ~90 tokens per turn telling the model to reason about a roster it cannot see.
+        sc_no_beats = SCENARIO.model_copy(update={"beats": []})
+        content = _all_content(build_director_prompt(_fixture_save(), sc_no_beats, CHARACTERS))
+        assert "transition condition" not in content
+        assert "beat_transition" not in content
+        # The other two rules survive, correctly renumbered.
+        assert "1) Who, if anyone, speaks next." in content
+        assert "2) Write a brief direction_note" in content
+
+    def test_beat_rule_present_when_a_roster_is_sent(self):
+        sc = SCENARIO.model_copy(update={"beats": [_make_beat(0, "b0"), _make_beat(1, "b1")]})
+        save = _fixture_save(current_beat_id="b0", sandbox_mode=False)
+        content = _all_content(build_director_prompt(save, sc, CHARACTERS))
+        assert "2) Whether the current beat's transition condition" in content
+        assert "3) Write a brief direction_note" in content
+
+    def test_terminal_beat_states_there_is_no_next_beat(self):
+        # On beat-adventure-complete the Director set beat_transition=true on every
+        # turn and invented an id each time. The roster having no further entries was
+        # not enough — say it outright.
+        sc = SCENARIO.model_copy(update={"beats": [_make_beat(0, "b0"), _make_beat(1, "b1")]})
+        save = _fixture_save(current_beat_id="b1", sandbox_mode=False)
+        content = _all_content(build_director_prompt(save, sc, CHARACTERS))
+        assert "This is the final beat" in content
+        assert "skip ahead to a later" not in content
+
+    def test_non_terminal_beat_keeps_the_skip_ahead_allowance(self):
+        sc = SCENARIO.model_copy(update={"beats": [_make_beat(0, "b0"), _make_beat(1, "b1")]})
+        save = _fixture_save(current_beat_id="b0", sandbox_mode=False)
+        content = _all_content(build_director_prompt(save, sc, CHARACTERS))
+        assert "skip ahead to a later" in content
+        assert "This is the final beat" not in content
+
+
+class TestSpeakerOutputRules:
+    """Bram prefixed his own name on 3 of 11 turns and wrote stage directions inside
+    dialogue. Both are structural, so the rule is shared rather than per-card."""
+
+    def test_companions_are_told_not_to_prefix_their_name(self):
+        messages = build_character_prompt(_char(is_dm=False), _scenario(), _save(), "Alice")
+        content = _all_content(messages)
+        assert "Never prefix your reply with your own name" in content
+        assert "stage directions" in content
+
+    def test_the_dm_does_not_get_the_dialogue_only_rule(self):
+        # The narrator's whole job is prose, not dialogue.
+        messages = build_character_prompt(_char(is_dm=True), _scenario(), _save(), "Alice")
+        assert "Never prefix your reply with your own name" not in _all_content(messages)
+
+
+class TestDmExclusionRule:
+    """The DM took over Silvaine's actions on a turn where the player had asked her
+    to act, and narrated a sword blow the player had explicitly refused to make."""
+
+    def test_names_companions_and_the_player(self):
+        save = _fixture_save()
+        messages = build_dm_prompt(save, SCENARIO, NARRATOR, companion_names=["Bram Stonefist"])
+        content = _all_content(messages)
+        assert "Bram Stonefist" in content
+        assert save.user_name in content
+
+    def test_forbids_deciding_what_they_do_not_just_what_they_say(self):
+        messages = build_dm_prompt(_fixture_save(), SCENARIO, NARRATOR,
+                                   companion_names=["Bram Stonefist"])
+        content = _all_content(messages)
+        assert "say, do, or choose" in content
+        # The old wording explicitly licensed narrating their actions.
+        assert "from the outside only" not in content
+
+    def test_present_even_with_no_companions(self):
+        # The player half of the rule still applies in a solo game.
+        save = _fixture_save()
+        content = _all_content(build_dm_prompt(save, SCENARIO, NARRATOR, companion_names=[]))
+        assert f"Narrate only what {save.user_name} has already stated" in content
+
+
+class TestCompanionStaleness:
+    """The Director set speaker_character_id=null on most turns; Silvaine spoke once
+    in 26. Prose exhortation had not moved it, so state the fact."""
+
+    def test_omitted_before_the_first_player_turn(self):
+        save = _fixture_save()
+        content = _all_content(build_director_prompt(save, SCENARIO, CHARACTERS))
+        assert "Turns since each companion last spoke" not in content
+
+    def test_reports_companions_who_have_never_spoken(self):
+        save = _fixture_save()
+        save.messages.append(
+            Message(id="u1", role="user", character_id=None, content="Hello?",
+                    timestamp="2026-01-01T00:00:00Z")
+        )
+        content = _all_content(build_director_prompt(save, SCENARIO, CHARACTERS))
+        assert "Bram Stonefist: has not spoken yet" in content
+        assert "Silvaine Dawnwhisper: has not spoken yet" in content
+
+    def test_counts_player_turns_since_a_companion_last_spoke(self):
+        save = _fixture_save()
+        save.messages.extend([
+            Message(id="u1", role="user", character_id=None, content="Hi",
+                    timestamp="2026-01-01T00:00:00Z"),
+            Message(id="c1", role="character", character_id="bram", content="Aye.",
+                    timestamp="2026-01-01T00:00:01Z"),
+            Message(id="u2", role="user", character_id=None, content="And now?",
+                    timestamp="2026-01-01T00:00:02Z"),
+            Message(id="u3", role="user", character_id=None, content="Still nothing?",
+                    timestamp="2026-01-01T00:00:03Z"),
+        ])
+        content = _all_content(build_director_prompt(save, SCENARIO, CHARACTERS))
+        assert "Bram Stonefist: 2 turns ago" in content
+
+    def test_reports_a_companion_who_spoke_on_the_last_turn(self):
+        save = _fixture_save()
+        save.messages.extend([
+            Message(id="u1", role="user", character_id=None, content="Hi",
+                    timestamp="2026-01-01T00:00:00Z"),
+            Message(id="c1", role="character", character_id="silvaine", content="Quite.",
+                    timestamp="2026-01-01T00:00:01Z"),
+        ])
+        content = _all_content(build_director_prompt(save, SCENARIO, CHARACTERS))
+        assert "Silvaine Dawnwhisper: spoke last turn" in content
+
+    def test_the_dm_is_not_listed_as_a_companion(self):
+        save = _fixture_save()
+        save.messages.append(
+            Message(id="u1", role="user", character_id=None, content="Hello?",
+                    timestamp="2026-01-01T00:00:00Z")
+        )
+        content = _all_content(build_director_prompt(save, SCENARIO, CHARACTERS))
+        line = next(
+            ln for ln in content.splitlines()
+            if ln.startswith("Turns since each companion last spoke")
+        )
+        assert NARRATOR.name not in line
+
     def test_beat_roster_marks_current_beat(self):
         b0, b1 = _make_beat(0, "b0"), _make_beat(1, "b1")
         sc = SCENARIO.model_copy(update={"beats": [b0, b1]})

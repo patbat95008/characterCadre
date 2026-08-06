@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import IO, Any
 
+from app.turn_context import get_phase, get_turn_id
+
 _ENABLED = os.environ.get("CC_DEBUG") == "1"
 _SEP_HEAVY = "═" * 72
 _SEP_LIGHT = "─" * 72
@@ -49,7 +51,19 @@ if _ENABLED:
 
 
 def _entry_header(call_type: str, model: str) -> str:
-    label = f"─── {call_type} · {model} · {_now()} "
+    """Header line, tagged with the ambient turn id and phase when one is set.
+
+    Without the tag, concurrent or successive turns interleave in these files
+    with no way to tell which call belonged to which turn.
+    """
+    label = f"─── {call_type} · {model} · {_now()}"
+    turn = get_turn_id()
+    if turn:
+        label += f" · turn={turn}"
+    phase = get_phase()
+    if phase:
+        label += f" · {phase}"
+    label += " "
     return label + "─" * max(0, 72 - len(label)) + "\n"
 
 

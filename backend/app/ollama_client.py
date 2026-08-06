@@ -2,12 +2,13 @@ import asyncio
 import json
 import logging
 import os
+import time
 from collections.abc import AsyncGenerator
 from typing import Any
 
 import ollama
 
-from app import llm_logger
+from app import llm_logger, markers, turn_context
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,8 @@ async def stream_chat(
     effective_options: dict[str, Any] = dict(options or {})
     if num_predict is not None:
         effective_options["num_predict"] = num_predict
+    started = time.monotonic()
+    first_token_ms: int | None = None
     try:
         stream = await client.chat(
             model=model,
@@ -75,6 +78,8 @@ async def stream_chat(
                 ) from exc
             token: str = chunk.message.content or ""
             if token:
+                if first_token_ms is None:
+                    first_token_ms = int((time.monotonic() - started) * 1000)
                 _log_buf.append(token)
                 yield token
     except (ConnectionError, OSError) as exc:
@@ -82,7 +87,18 @@ async def stream_chat(
     except ollama.ResponseError as exc:
         raise OllamaUnreachableError(f"Ollama response error: {exc}") from exc
     finally:
-        llm_logger.log_output("stream_chat", model, "".join(_log_buf))
+        text = "".join(_log_buf)
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        llm_logger.log_output("stream_chat", model, text)
+        turn_context.bump("llm_calls")
+        turn_context.bump("llm_ms", elapsed_ms)
+        markers.emit(
+            "llm.call",
+            kind="stream",
+            ms=elapsed_ms,
+            ttft_ms=first_token_ms,
+            chars=len(text),
+        )
 
 
 async def structured_chat(
@@ -103,6 +119,7 @@ async def structured_chat(
     """
     llm_logger.log_input("structured_chat", model, messages)
     client = _get_client()
+    started = time.monotonic()
     try:
         response = await asyncio.wait_for(
             client.chat(
@@ -114,9 +131,25 @@ async def structured_chat(
             timeout=OLLAMA_STRUCTURED_TIMEOUT_SECONDS,
         )
         result: dict[str, Any] = json.loads(response.message.content)  # type: ignore[arg-type]
+        elapsed_ms = int((time.monotonic() - started) * 1000)
         llm_logger.log_output("structured_chat", model, result)
+        turn_context.bump("llm_calls")
+        turn_context.bump("llm_ms", elapsed_ms)
+        markers.emit(
+            "llm.call",
+            kind="structured",
+            ms=elapsed_ms,
+            keys=",".join(sorted(result)) if isinstance(result, dict) else "-",
+        )
         return result
     except asyncio.TimeoutError as exc:
+        turn_context.bump("llm_calls")
+        markers.emit(
+            "llm.call",
+            kind="structured",
+            ms=int((time.monotonic() - started) * 1000),
+            error="timeout",
+        )
         raise OllamaTimeoutError(
             f"Structured call timed out after {OLLAMA_STRUCTURED_TIMEOUT_SECONDS}s"
         ) from exc

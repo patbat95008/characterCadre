@@ -14,7 +14,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from app import storage
+from app import markers, storage
+from app.constants import DEFAULT_MAX_CONTEXT_TOKENS
 from app.models import Message, Save
 from app.variables import apply_variables
 
@@ -165,7 +166,7 @@ def create_save_route(payload: CreateSaveRequest) -> Save:
         current_beat_id=current_beat_id,
         sandbox_mode=False,
         messages=[opening],
-        max_context_tokens=8192,
+        max_context_tokens=DEFAULT_MAX_CONTEXT_TOKENS,
         created_at=now,
         updated_at=now,
     )
@@ -259,6 +260,15 @@ def advance_beat_route(save_id: str, payload: AdvanceBeatRequest) -> Save:
         save.id,
         trigger,
     )
+    markers.emit(
+        "beat.advance",
+        to_id=target.id,
+        to_order=target.order,
+        from_name=old_beat_name,
+        to_name=target.name,
+        trigger=trigger,
+        starter_chars=len(starter),
+    )
     return save
 
 
@@ -270,6 +280,15 @@ def set_sandbox_mode_route(save_id: str, payload: SandboxModeRequest) -> Save:
     if save is None:
         raise HTTPException(404, "Save not found")
     save.sandbox_mode = payload.enabled
+    # Enabling sandbox detaches the save from beat progression: the Director
+    # prompt suppresses the beat roster while sandbox_mode is true, so a
+    # stale current_beat_id would desynchronize backend state from what the
+    # LLM sees. Clearing on toggle-on keeps the two in step.
+    if payload.enabled:
+        save.current_beat_id = None
     storage.save_save(save)
-    logger.info("sandbox mode set (save=%s, enabled=%s)", save.id, payload.enabled)
+    logger.info(
+        "sandbox mode set (save=%s, enabled=%s, beat_cleared=%s)",
+        save.id, payload.enabled, payload.enabled,
+    )
     return save

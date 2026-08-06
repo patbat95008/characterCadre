@@ -66,7 +66,7 @@ NARRATOR = Character(
 _BRAM_DESCRIPTION = (
     "You are {{char}}, a gruff dwarven fighter travelling with {{user}}. "
     "You are battle-hardened, practical, and deeply suspicious of magic. "
-    "You speak in short, blunt sentences. You call {{user}} 'lad' or 'lass' depending on context. "
+    "You speak in short, blunt sentences. You address {{user}} by name. "
     "You have seen two other parties die in dungeons — you do not take risks lightly. "
     "You give tactical advice, assess threats aloud, and occasionally grumble about your knees. "
     "You never wax poetic. Keep responses to 1–3 sentences."
@@ -88,7 +88,7 @@ BRAM = Character(
             "char": (
                 "Aye. Sulfur and something rotten. "
                 "Could be a gas pocket — or something worse. "
-                "Watch your step, lad."
+                "Watch your step, {{user}}."
             ),
         },
         {
@@ -239,7 +239,15 @@ _BEAT_THE_BATTLE = Beat(
     transition_condition=(
         "When the Lich King is defeated and the player picks up the Ember Clasp from his cape."
     ),
-    starter_prompt="",
+    starter_prompt=(
+        "The Lich King spreads his arms wide, and the green torchlight bends toward him "
+        "as though it were being inhaled.\n\n"
+        "\"YES! Come at me! Three centuries — THREE CENTURIES — and not one blade, not one "
+        "spell, not one clever little trick has so much as scratched the Lich King!\"\n\n"
+        "He descends the last of the stairs without hurrying. His tattered cape drags "
+        "behind him, and pinned at the shoulder is a small bronze clasp shaped like a "
+        "coal, catching the moonlight with a warmth that nothing else in this room has."
+    ),
 )
 
 _BEAT_ADVENTURE_COMPLETE = Beat(

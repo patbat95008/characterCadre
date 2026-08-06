@@ -132,7 +132,7 @@ export default function Game() {
       if (charId && characterIndex[charId]) return characterIndex[charId].name
       // Find the DM in the active roster
       for (const c of Object.values(characterIndex)) if (c.is_dm) return c.name
-      return 'Narrator'
+      return 'DM'
     }
     if (charId && characterIndex[charId]) return characterIndex[charId].name
     return 'Character'
@@ -190,7 +190,7 @@ export default function Game() {
           if (existingId && existingId.startsWith('stream-')) {
             setMessages(prev => prev.map(m => (m.id === existingId ? { ...m, content: m.content + token } : m)))
           } else {
-            const id = `stream-${charId}-${Date.now()}`
+            const id = `stream-${charId}-${crypto.randomUUID()}`
             placeholdersRef.current[charId] = id
             const placeholder: Message = {
               id,
@@ -225,9 +225,13 @@ export default function Game() {
           setCurrentBeatName(event.new_beat_name)
           setSave(s => (s ? { ...s, current_beat_id: event.new_beat_id } : s))
         },
-        onEndingReached: () => {
+        onEndingReached: (event) => {
           setSandboxMode(true)
           setShowEndingModal(true)
+          if (event.new_beat_name) setCurrentBeatName(event.new_beat_name)
+          if (event.new_beat_id) {
+            setSave(s => (s ? { ...s, current_beat_id: event.new_beat_id ?? null } : s))
+          }
         },
         onMessageComplete: (event: MessageCompleteEvent) => {
           const charId = event.character_id
@@ -317,6 +321,7 @@ export default function Game() {
       const updated = await savesApi.setSandboxMode(save.id, !sandboxMode)
       setSandboxMode(updated.sandbox_mode)
       setSave(updated)
+      if (updated.sandbox_mode) setCurrentBeatName(null)
     } catch (e) {
       showToast(e instanceof Error ? e.message : 'Toggle failed')
     }

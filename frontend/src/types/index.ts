@@ -109,6 +109,17 @@ export interface BeatTransitionEvent {
   new_beat_name: string
 }
 
+/**
+ * Emitted exactly once when the final beat completes. On ending, the backend
+ * suppresses the parallel `beat_transition` event and merges the final beat
+ * info (if any) into this payload alongside `sandbox_mode: true`.
+ */
+export interface EndingReachedEvent {
+  sandbox_mode: boolean
+  new_beat_id?: string
+  new_beat_name?: string
+}
+
 export interface TokenEvent {
   character_id: string
   text: string

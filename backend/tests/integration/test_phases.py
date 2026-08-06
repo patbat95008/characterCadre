@@ -9,7 +9,14 @@ from unittest.mock import AsyncMock, patch
 
 from app.fixtures import BRAM, CHARACTERS, NARRATOR, SCENARIO, make_stage1_save
 from app.models import Beat, Message, Scenario
-from app.phases import apply_beat_transition, run_director, run_phase2, run_phase3
+from app.phases import (
+    apply_beat_transition,
+    classify_advance,
+    find_next_beat,
+    run_director,
+    run_phase2,
+    run_phase3,
+)
 from app.validation import OPTIONS_FALLBACK
 
 
@@ -102,6 +109,83 @@ class TestRunDirector:
 
 # ── apply_beat_transition ─────────────────────────────────────────────────────
 
+class TestFindNextBeat:
+
+    def test_from_no_beat_the_next_beat_is_the_first_one(self):
+        # New saves start with current_beat_id=None. Returning None here made the
+        # player's beat-advance toggle a no-op on the opening turn.
+        b0, b1 = _make_beat(0, "b0"), _make_beat(1, "b1")
+        sc = SCENARIO.model_copy(update={"beats": [b0, b1]})
+        save = _fixture_save(current_beat_id=None, sandbox_mode=False)
+        assert find_next_beat(save, sc).id == "b0"
+
+    def test_first_beat_is_chosen_by_order_not_list_position(self):
+        b0, b1 = _make_beat(0, "b0"), _make_beat(1, "b1")
+        sc = SCENARIO.model_copy(update={"beats": [b1, b0]})
+        save = _fixture_save(current_beat_id=None, sandbox_mode=False)
+        assert find_next_beat(save, sc).id == "b0"
+
+    def test_from_a_beat_the_next_is_the_next_by_order(self):
+        b0, b1, b2 = _make_beat(0, "b0"), _make_beat(1, "b1"), _make_beat(2, "b2")
+        sc = SCENARIO.model_copy(update={"beats": [b0, b1, b2]})
+        save = _fixture_save(current_beat_id="b0", sandbox_mode=False)
+        assert find_next_beat(save, sc).id == "b1"
+
+    def test_final_beat_has_no_next(self):
+        b0, b1 = _make_beat(0, "b0"), _make_beat(1, "b1")
+        sc = SCENARIO.model_copy(update={"beats": [b0, b1]})
+        save = _fixture_save(current_beat_id="b1", sandbox_mode=False)
+        assert find_next_beat(save, sc) is None
+
+    def test_sandbox_mode_still_has_no_next_beat(self):
+        # Sandbox detaches the save from beat progression and clears the beat id,
+        # so the None-beat shortcut must not resurrect progression there.
+        b0, b1 = _make_beat(0, "b0"), _make_beat(1, "b1")
+        sc = SCENARIO.model_copy(update={"beats": [b0, b1]})
+        save = _fixture_save(current_beat_id=None, sandbox_mode=True)
+        assert find_next_beat(save, sc) is None
+
+    def test_scenario_without_beats_has_no_next_beat(self):
+        sc = SCENARIO.model_copy(update={"beats": []})
+        save = _fixture_save(current_beat_id=None, sandbox_mode=False)
+        assert find_next_beat(save, sc) is None
+
+
+class TestClassifyAdvance:
+    """What the beat-advance flag would actually do — must mirror routes/chat.py."""
+
+    def test_fresh_save_starts_the_adventure(self):
+        b0, b1 = _make_beat(0, "b0"), _make_beat(1, "b1")
+        sc = SCENARIO.model_copy(update={"beats": [b0, b1]})
+        save = _fixture_save(current_beat_id=None, sandbox_mode=False)
+        assert classify_advance(save, sc) == "start"
+
+    def test_mid_story_advances_a_beat(self):
+        b0, b1 = _make_beat(0, "b0"), _make_beat(1, "b1")
+        sc = SCENARIO.model_copy(update={"beats": [b0, b1]})
+        save = _fixture_save(current_beat_id="b0", sandbox_mode=False)
+        assert classify_advance(save, sc) == "beat"
+
+    def test_final_beat_is_the_ending_not_a_dead_button(self):
+        # find_next_beat() returns None here, but chat.py's flag branch turns that
+        # into the ending — treating it as "nothing to do" disables the ending.
+        b0, b1 = _make_beat(0, "b0"), _make_beat(1, "b1")
+        sc = SCENARIO.model_copy(update={"beats": [b0, b1]})
+        save = _fixture_save(current_beat_id="b1", sandbox_mode=False)
+        assert classify_advance(save, sc) == "ending"
+
+    def test_sandbox_has_nothing_to_advance(self):
+        b0, b1 = _make_beat(0, "b0"), _make_beat(1, "b1")
+        sc = SCENARIO.model_copy(update={"beats": [b0, b1]})
+        save = _fixture_save(current_beat_id="b1", sandbox_mode=True)
+        assert classify_advance(save, sc) == "none"
+
+    def test_beatless_scenario_has_nothing_to_advance(self):
+        sc = SCENARIO.model_copy(update={"beats": []})
+        save = _fixture_save(current_beat_id=None, sandbox_mode=False)
+        assert classify_advance(save, sc) == "none"
+
+
 class TestApplyBeatTransition:
 
     def test_no_transition_when_flag_false(self):
@@ -151,6 +235,46 @@ class TestApplyBeatTransition:
         assert new_msg.role == "dm"
         assert b1.starter_prompt in new_msg.content
         assert new_msg.beat_id_at_time == "b1"
+
+    def test_empty_starter_prompt_appends_no_message(self):
+        # `beat-the-battle` shipped with starter_prompt="" and the append happened
+        # regardless, writing a blank bubble to the log and a zero-length message
+        # into every prompt built from that history afterwards.
+        from app.models import DirectorResponse
+        b0 = _make_beat(0, "b0")
+        b1 = _make_beat(1, "b1").model_copy(update={"starter_prompt": ""})
+        sc = SCENARIO.model_copy(update={"beats": [b0, b1]})
+        save = _fixture_save(current_beat_id="b0", sandbox_mode=False)
+        msg_count_before = len(save.messages)
+        dr = DirectorResponse(
+            speaker_character_id="bram",
+            dm_should_narrate=True,
+            beat_transition=True,
+            next_beat_id="b1",
+            direction_note="",
+        )
+        result = apply_beat_transition(save, sc, dr)
+        # The transition still happens — only the blank message is suppressed.
+        assert result == {"new_beat_id": "b1", "new_beat_name": "Beat 1"}
+        assert save.current_beat_id == "b1"
+        assert len(save.messages) == msg_count_before
+
+    def test_whitespace_only_starter_prompt_appends_no_message(self):
+        from app.models import DirectorResponse
+        b0 = _make_beat(0, "b0")
+        b1 = _make_beat(1, "b1").model_copy(update={"starter_prompt": "   \n  "})
+        sc = SCENARIO.model_copy(update={"beats": [b0, b1]})
+        save = _fixture_save(current_beat_id="b0", sandbox_mode=False)
+        msg_count_before = len(save.messages)
+        dr = DirectorResponse(
+            speaker_character_id="bram",
+            dm_should_narrate=True,
+            beat_transition=True,
+            next_beat_id="b1",
+            direction_note="",
+        )
+        apply_beat_transition(save, sc, dr)
+        assert len(save.messages) == msg_count_before
 
     def test_invalid_next_beat_id_returns_none(self):
         from app.models import DirectorResponse
@@ -289,6 +413,35 @@ class TestRunPhase2:
         assert notices[0]["level"] == "warning"
         assert "nothing" in notices[0]["message"].lower()
 
+    async def test_dm_speaker_with_narration_runs_single_draft(self):
+        # When the Director picks the DM as the speaker AND requests narration,
+        # Phase 2 must collapse to a single DM step: one draft + one stream,
+        # producing exactly one DM message. Pre-rearchitecture this path made
+        # two drafts and two messages.
+        from app.models import DirectorResponse
+        save = _fixture_save()
+        initial_count = len(save.messages)
+        dr = DirectorResponse(
+            speaker_character_id=NARRATOR.id,
+            dm_should_narrate=True,
+            beat_transition=False,
+            next_beat_id=None,
+            direction_note="The lich king watches in silence.",
+        )
+        stream_calls = 0
+        async def mock_stream(model, messages, **kwargs):
+            nonlocal stream_calls
+            stream_calls += 1
+            yield "The torches gutter; nothing moves."
+        with patch("app.phases.stream_chat", side_effect=mock_stream):
+            await _collect_phase2(save, SCENARIO, CHARACTERS, dr)
+        # 1 director-draft + 1 DM stream = 2 total stream calls (not 4).
+        assert stream_calls == 2
+        new_messages = save.messages[initial_count:]
+        assert len(new_messages) == 1
+        assert new_messages[0].role == "dm"
+        assert new_messages[0].character_id == NARRATOR.id
+
     async def test_messages_appended_to_save(self):
         from app.models import DirectorResponse
         save = _fixture_save()
@@ -347,6 +500,78 @@ class TestRunPhase3:
         options, context = await run_phase3(save, SCENARIO, chars)
         assert options == list(OPTIONS_FALLBACK)
         assert context == ""
+
+
+class TestPhase3TransitionCondition:
+    """Which beat's condition the options are judged against.
+
+    A beat's transition_condition is what moves you OUT of it, so reading it off
+    find_next_beat() handed the option generator the condition for a scene the party
+    had not reached — one beat ahead of the one the Director judges against. On
+    beat-entry-hall the options were told the gate was "get past the fire trap".
+    """
+
+    @staticmethod
+    async def _instruction_for(save, scenario) -> str:
+        """Run phase 3 and return the options instruction that reached the model."""
+        seen: list[str] = []
+
+        async def capture(model, messages, schema, **kwargs):
+            seen.append(messages[-1]["content"])
+            return {"options": [
+                {"text": "A.", "advances_beat": False, "dice_roll": None},
+                {"text": "B.", "advances_beat": True, "dice_roll": None},
+                {"text": "C.", "advances_beat": False, "dice_roll": None},
+                {"text": "D.", "advances_beat": False, "dice_roll": None},
+            ]}
+
+        with patch("app.phases.stream_chat", side_effect=_mock_draft_stream), \
+             patch("app.phases.structured_chat", side_effect=capture):
+            options, _ = await run_phase3(save, scenario, CHARACTERS)
+        return seen[-1], options
+
+    async def test_uses_the_current_beats_condition_not_the_next_ones(self):
+        b0, b1 = _make_beat(0, "b0"), _make_beat(1, "b1")
+        sc = SCENARIO.model_copy(update={"beats": [b0, b1]})
+        save = _fixture_save(current_beat_id="b0", sandbox_mode=False)
+        instruction, _ = await self._instruction_for(save, sc)
+        assert "Beat 0 condition" in instruction
+        assert "Beat 1 condition" not in instruction
+
+    async def test_fresh_save_is_told_the_adventure_has_not_begun(self):
+        # current_beat_id=None has no condition of its own, but an advance is still
+        # possible — it moves into beat 0.
+        b0, b1 = _make_beat(0, "b0"), _make_beat(1, "b1")
+        sc = SCENARIO.model_copy(update={"beats": [b0, b1]})
+        save = _fixture_save(current_beat_id=None, sandbox_mode=False)
+        instruction, _ = await self._instruction_for(save, sc)
+        assert "has not begun" in instruction
+        assert "Beat 0 condition" not in instruction
+
+    async def test_final_beat_asks_for_a_closing_option(self):
+        b0, b1 = _make_beat(0, "b0"), _make_beat(1, "b1")
+        sc = SCENARIO.model_copy(update={"beats": [b0, b1]})
+        save = _fixture_save(current_beat_id="b1", sandbox_mode=False)
+        instruction, options = await self._instruction_for(save, sc)
+        assert "final scene" in instruction
+        # The flag is the ending button here, so it must survive.
+        assert any(o["advances_beat"] for o in options)
+
+    async def test_sandbox_strips_the_advance_flag(self):
+        # Nothing in chat.py can act on the flag in sandbox mode, so an option
+        # carrying it is a genuinely dead button.
+        b0, b1 = _make_beat(0, "b0"), _make_beat(1, "b1")
+        sc = SCENARIO.model_copy(update={"beats": [b0, b1]})
+        save = _fixture_save(current_beat_id=None, sandbox_mode=True)
+        _, options = await self._instruction_for(save, sc)
+        assert not any(o["advances_beat"] for o in options)
+
+    async def test_bold_is_the_first_tone_so_the_top_option_leans_forward(self):
+        b0, b1 = _make_beat(0, "b0"), _make_beat(1, "b1")
+        sc = SCENARIO.model_copy(update={"beats": [b0, b1]})
+        save = _fixture_save(current_beat_id="b0", sandbox_mode=False)
+        instruction, _ = await self._instruction_for(save, sc)
+        assert instruction.index("one bold") < instruction.index("one cautious")
 
     async def test_accepts_direction_note_parameter(self):
         raw = {"options": [

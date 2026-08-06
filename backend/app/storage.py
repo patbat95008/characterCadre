@@ -15,6 +15,7 @@ the simplicity is worth more than the marginal IO cost.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -193,6 +194,28 @@ def save_save(save: Save) -> None:
         len(save.messages),
         save.current_beat_id or "none",
     )
+
+
+# Per-save asyncio locks for callers running in async context (notably the
+# chat-turn SSE handler). Sync route handlers — which FastAPI runs on a
+# threadpool — don't acquire these; they're protected only by being short and
+# atomic on disk. This is a single-process safeguard. Multi-worker uvicorn
+# would still need an OS-level file lock.
+_save_locks: dict[str, asyncio.Lock] = {}
+
+
+def _lock_for(save_id: str) -> asyncio.Lock:
+    lock = _save_locks.get(save_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _save_locks[save_id] = lock
+    return lock
+
+
+async def save_save_locked(save: Save) -> None:
+    """Async-context wrapper around save_save() that serializes writes by save_id."""
+    async with _lock_for(save.id):
+        save_save(save)
 
 
 def delete_save(save_id: str) -> bool:

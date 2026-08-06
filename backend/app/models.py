@@ -4,6 +4,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict
 
+from app.constants import DEFAULT_MAX_CONTEXT_TOKENS, DEFAULT_RESPONSE_RESERVE
+
 
 class Message(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -69,7 +71,7 @@ class Save(BaseModel):
     current_beat_id: Optional[str] = None
     sandbox_mode: bool = False
     messages: list[Message] = []
-    max_context_tokens: int = 8192
+    max_context_tokens: int = DEFAULT_MAX_CONTEXT_TOKENS
     created_at: str  # iso8601
     updated_at: str  # iso8601
 
@@ -90,7 +92,7 @@ class TurnRequest(BaseModel):
     user_message: str
     save_id: str = "stage1"
     favored_character_ids: list[str] = []
-    response_reserve: int = 1024
+    response_reserve: int = DEFAULT_RESPONSE_RESERVE
     max_response_tokens: Optional[int] = None
     beat_advance: bool = False
     dice_roll: Optional[DiceSpec] = None

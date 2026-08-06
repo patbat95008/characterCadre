@@ -68,6 +68,18 @@ class TestValidateDirectorResponse:
         assert isinstance(result, Ok)
         assert result.value.speaker_character_id is None
 
+    def test_null_speaker_without_narration_returns_err(self):
+        # speaker=None AND dm_should_narrate=False would produce a zero-content
+        # turn; the validator rejects so with_validation can retry.
+        raw = {
+            **_valid_director_raw("bram"),
+            "speaker_character_id": None,
+            "dm_should_narrate": False,
+        }
+        result = validate_director_response(raw, SCENARIO, CHARACTERS, _fixture_save())
+        assert isinstance(result, Err)
+        assert "no content" in result.reason
+
     def test_unknown_speaker_returns_err(self):
         raw = _valid_director_raw("unknown-id")
         result = validate_director_response(raw, SCENARIO, CHARACTERS, _fixture_save())
@@ -107,8 +119,10 @@ class TestValidateDirectorResponse:
         assert "no beats" in result.reason
 
     def test_beat_transition_without_next_beat_id_returns_err(self):
-        b0 = _make_beat(0, "b0")
-        sc = SCENARIO.model_copy(update={"beats": [b0]})
+        # b1 exists so the save is not on the terminal beat, where every transition
+        # is clamped off before the per-field rules are reached.
+        b0, b1 = _make_beat(0, "b0"), _make_beat(1, "b1")
+        sc = SCENARIO.model_copy(update={"beats": [b0, b1]})
         raw = {**_valid_director_raw("bram"), "beat_transition": True, "next_beat_id": None}
         save = _fixture_save(current_beat_id="b0", sandbox_mode=False)
         result = validate_director_response(raw, sc, CHARACTERS, save)
@@ -116,8 +130,8 @@ class TestValidateDirectorResponse:
         assert "next_beat_id" in result.reason
 
     def test_beat_transition_backward_jump_returns_err(self):
-        b0, b1 = _make_beat(0, "b0"), _make_beat(1, "b1")
-        sc = SCENARIO.model_copy(update={"beats": [b0, b1]})
+        b0, b1, b2 = _make_beat(0, "b0"), _make_beat(1, "b1"), _make_beat(2, "b2")
+        sc = SCENARIO.model_copy(update={"beats": [b0, b1, b2]})
         # Current is b1 (order=1), trying to go back to b0 (order=0)
         raw = {**_valid_director_raw("bram"), "beat_transition": True, "next_beat_id": "b0"}
         save = _fixture_save(current_beat_id="b1", sandbox_mode=False)
@@ -136,13 +150,76 @@ class TestValidateDirectorResponse:
         assert result.value.next_beat_id == "b2"
 
     def test_beat_transition_to_nonexistent_beat_returns_err(self):
-        b0 = _make_beat(0, "b0")
-        sc = SCENARIO.model_copy(update={"beats": [b0]})
+        b0, b1 = _make_beat(0, "b0"), _make_beat(1, "b1")
+        sc = SCENARIO.model_copy(update={"beats": [b0, b1]})
         raw = {**_valid_director_raw("bram"), "beat_transition": True, "next_beat_id": "no-such-id"}
         save = _fixture_save(current_beat_id="b0", sandbox_mode=False)
         result = validate_director_response(raw, sc, CHARACTERS, save)
         assert isinstance(result, Err)
         assert "not found" in result.reason
+
+    def test_terminal_beat_transition_is_clamped_off_not_rejected(self):
+        # `beat-adventure-complete` has transition_condition "Never", yet the Director
+        # set beat_transition=true on every turn spent there and invented a next_beat_id
+        # each time (`beat-game-over`, `beat-new-adventure`). Rejecting burned all three
+        # attempts and landed on DIRECTOR_FALLBACK, so clamp instead.
+        b0, b1 = _make_beat(0, "b0"), _make_beat(1, "b1")
+        sc = SCENARIO.model_copy(update={"beats": [b0, b1]})
+        raw = {
+            **_valid_director_raw("bram"),
+            "beat_transition": True,
+            "next_beat_id": "beat-game-over",
+        }
+        save = _fixture_save(current_beat_id="b1", sandbox_mode=False)
+        result = validate_director_response(raw, sc, CHARACTERS, save)
+        assert isinstance(result, Ok)
+        assert result.value.beat_transition is False
+        assert result.value.next_beat_id is None
+        # The rest of the decision survives — only the transition is dropped.
+        assert result.value.speaker_character_id == "bram"
+
+    def test_invented_beat_id_still_rejected_when_a_forward_beat_exists(self):
+        # The terminal clamp must not become a blanket amnesty for hallucinated ids.
+        b0, b1 = _make_beat(0, "b0"), _make_beat(1, "b1")
+        sc = SCENARIO.model_copy(update={"beats": [b0, b1]})
+        raw = {
+            **_valid_director_raw("bram"),
+            "beat_transition": True,
+            "next_beat_id": "beat-game-over",
+        }
+        save = _fixture_save(current_beat_id="b0", sandbox_mode=False)
+        result = validate_director_response(raw, sc, CHARACTERS, save)
+        assert isinstance(result, Err)
+        assert "not found" in result.reason
+
+    def test_first_transition_from_no_beat_must_be_the_first_beat(self):
+        # A fresh save has current_beat_id=None, so the forward-order rule has
+        # nothing to compare against. Without an explicit rule the Director can
+        # open the adventure on its final scene.
+        b0, b1, b2 = _make_beat(0, "b0"), _make_beat(1, "b1"), _make_beat(2, "b2")
+        sc = SCENARIO.model_copy(update={"beats": [b0, b1, b2]})
+        raw = {**_valid_director_raw("bram"), "beat_transition": True, "next_beat_id": "b2"}
+        save = _fixture_save(current_beat_id=None, sandbox_mode=False)
+        result = validate_director_response(raw, sc, CHARACTERS, save)
+        assert isinstance(result, Err)
+        assert "skips ahead" in result.reason
+        assert "b0" in result.reason
+
+    def test_first_transition_into_the_first_beat_ok(self):
+        b0, b1 = _make_beat(0, "b0"), _make_beat(1, "b1")
+        sc = SCENARIO.model_copy(update={"beats": [b0, b1]})
+        raw = {**_valid_director_raw("bram"), "beat_transition": True, "next_beat_id": "b0"}
+        save = _fixture_save(current_beat_id=None, sandbox_mode=False)
+        result = validate_director_response(raw, sc, CHARACTERS, save)
+        assert isinstance(result, Ok)
+        assert result.value.next_beat_id == "b0"
+
+    def test_first_beat_is_by_order_not_list_position(self):
+        b0, b1 = _make_beat(0, "b0"), _make_beat(1, "b1")
+        sc = SCENARIO.model_copy(update={"beats": [b1, b0]})  # deliberately unsorted
+        raw = {**_valid_director_raw("bram"), "beat_transition": True, "next_beat_id": "b0"}
+        save = _fixture_save(current_beat_id=None, sandbox_mode=False)
+        assert isinstance(validate_director_response(raw, sc, CHARACTERS, save), Ok)
 
 
 # ── validate_options_response ─────────────────────────────────────────────────

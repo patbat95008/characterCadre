@@ -8,6 +8,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
+from app import markers
+from app.constants import LOOP_MIN_LENGTH, OPTIONS_MAX, OPTIONS_MIN
 from app.models import Character, DirectorResponse, Save, Scenario
 
 logger = logging.getLogger(__name__)
@@ -55,6 +57,21 @@ _VALID_DIFFICULTIES = {"Easy", "Medium", "Hard"}
 
 # ── Validators ────────────────────────────────────────────────────────────────
 
+def _is_terminal_beat(save: Save, scenario: Scenario) -> bool:
+    """True when the save sits on the highest-order beat, so no forward beat exists.
+
+    Mirrors `phases.find_next_beat() is None` for the has-a-current-beat case, but
+    lives here to keep validation free of a phases import (phases imports validation).
+    """
+    if not save.current_beat_id or not scenario.beats:
+        return False
+    beats_by_id = {b.id: b for b in scenario.beats}
+    current = beats_by_id.get(save.current_beat_id)
+    if current is None:
+        return False
+    return not any(b.order > current.order for b in scenario.beats)
+
+
 def validate_director_response(
     raw: dict,
     scenario: Scenario,
@@ -80,6 +97,15 @@ def validate_director_response(
             return Err(
                 f"speaker_character_id '{resp.speaker_character_id}' not found in characters"
             )
+    elif not resp.dm_should_narrate:
+        # speaker_character_id=None AND dm_should_narrate=False would produce a
+        # turn with zero content — only fresh options. Reject so with_validation
+        # retries; only if retries exhaust does the DIRECTOR_FALLBACK (which
+        # narrates and picks a companion) take over.
+        return Err(
+            "speaker_character_id is null but dm_should_narrate is false — "
+            "turn would produce no content"
+        )
 
     # beat transition rules
     if resp.beat_transition:
@@ -87,6 +113,17 @@ def validate_director_response(
             return Err("beat_transition=True but save is in sandbox_mode")
         if not scenario.beats:
             return Err("beat_transition=True but scenario has no beats")
+
+        # On the terminal beat there is nothing to move into, and the model reliably
+        # invents an id rather than declining ('beat-game-over', 'beat-new-adventure').
+        # Rejecting burns all three attempts and lands on DIRECTOR_FALLBACK, so clamp
+        # instead — the same shape as the advances_beat clamping below. Only applies
+        # when there is genuinely no forward beat; hallucinated ids anywhere else are
+        # still rejected.
+        if _is_terminal_beat(save, scenario):
+            resp = resp.model_copy(update={"beat_transition": False, "next_beat_id": None})
+            return Ok(resp)
+
         if not resp.next_beat_id:
             return Err("beat_transition=True but next_beat_id is missing")
 
@@ -103,12 +140,20 @@ def validate_director_response(
                     f"next_beat_id '{resp.next_beat_id}' (order={next_beat.order}) is not "
                     f"forward from current beat (order={current_beat.order})"
                 )
+        else:
+            # No current beat means the story hasn't started — the party is still
+            # at the scenario's opening message. The only legal move is into the
+            # first beat; without this the forward-order rule above never applies
+            # and the Director can open the adventure on its final scene.
+            first_beat = min(scenario.beats, key=lambda b: b.order)
+            if next_beat.id != first_beat.id:
+                return Err(
+                    f"next_beat_id '{resp.next_beat_id}' (order={next_beat.order}) skips "
+                    f"ahead — the story has not started, so the only forward beat is "
+                    f"'{first_beat.id}' (order={first_beat.order})"
+                )
 
     return Ok(resp)
-
-
-OPTIONS_MIN = 2
-OPTIONS_MAX = 6
 
 
 def validate_options_response(raw: dict) -> "Result[list[dict]]":
@@ -217,9 +262,6 @@ def _normalize(text: str) -> str:
     return text
 
 
-LOOP_MIN_LENGTH = 40
-
-
 def is_loop(
     new_text: str,
     previous_text: str,
@@ -270,6 +312,13 @@ async def with_validation(
             attempt + 1,
             max_retries + 1,
         )
+        markers.emit(
+            "validation.failed",
+            call=call_name,
+            attempt=attempt + 1,
+            of=max_retries + 1,
+            reason=last_reason,
+        )
 
         if attempt < max_retries:
             if on_retry is not None:
@@ -278,6 +327,7 @@ async def with_validation(
             logger.warning(
                 "fallback engaged (call=%s, reason=%s)", call_name, last_reason
             )
+            markers.emit("validation.fallback", call=call_name, reason=last_reason)
             if on_failure is not None:
                 return on_failure()
             raise RuntimeError(

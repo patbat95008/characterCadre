@@ -9,44 +9,11 @@ server.
 from __future__ import annotations
 
 import io
-from pathlib import Path
-from unittest.mock import AsyncMock, patch
-
-import pytest
-from httpx import ASGITransport, AsyncClient
 
 from app import storage
 from app.fixtures import BRAM, NARRATOR, SCENARIO
 
-
-@pytest.fixture(autouse=True)
-def isolated_data_dir(tmp_path: Path, monkeypatch):
-    monkeypatch.setattr(storage, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(storage, "CHARACTERS_DIR", tmp_path / "characters")
-    monkeypatch.setattr(storage, "SCENARIOS_DIR", tmp_path / "scenarios")
-    monkeypatch.setattr(storage, "SAVES_DIR", tmp_path / "saves")
-    monkeypatch.setattr(storage, "AVATARS_DIR", tmp_path / "avatars")
-    storage._ensure_dirs()
-    storage.save_character(NARRATOR)
-    storage.save_character(BRAM)
-    storage.save_scenario(SCENARIO)
-    yield
-
-
-@pytest.fixture
-def mock_summarizer():
-    """Replace the summarizer's structured_chat so background tasks don't hang."""
-    fake = AsyncMock(return_value={"summary": "mocked summary"})
-    with patch("app.summarizer.structured_chat", fake):
-        yield fake
-
-
-@pytest.fixture
-async def client():
-    from app.main import app
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        yield ac
+# isolated_data_dir (autouse), client and mock_summarizer come from tests/conftest.py
 
 
 # ── Characters ────────────────────────────────────────────────────────────────
@@ -381,6 +348,45 @@ async def test_sandbox_mode_toggle(client, mock_summarizer):
     r2 = await client.post(f"/api/saves/{save_id}/sandbox-mode", json={"enabled": True})
     assert r2.status_code == 200
     assert r2.json()["sandbox_mode"] is True
+
+
+async def test_sandbox_enable_clears_current_beat_id(client, mock_summarizer):
+    # Set up: scenario with beats, advance the save to beat b2, then enable
+    # sandbox. The toggle must null out current_beat_id so backend state
+    # matches what the Director sees (sandbox suppresses the beat roster).
+    r = await client.get(f"/api/scenarios/{SCENARIO.id}")
+    scenario = r.json()
+    scenario["beats"] = [
+        {"id": "b1", "order": 0, "name": "B1", "description": "", "summary": "",
+         "summary_hash": "", "transition_condition": "", "starter_prompt": "Start b1."},
+        {"id": "b2", "order": 1, "name": "B2", "description": "", "summary": "",
+         "summary_hash": "", "transition_condition": "", "starter_prompt": "Start b2."},
+    ]
+    await client.put(f"/api/scenarios/{SCENARIO.id}", json=scenario)
+    r = await client.post("/api/saves", json={
+        "scenario_id": SCENARIO.id,
+        "active_character_ids": [NARRATOR.id, BRAM.id],
+        "user_name": "Alice",
+    })
+    save_id = r.json()["id"]
+    await client.post(
+        f"/api/saves/{save_id}/advance-beat",
+        json={"next_beat_id": "b2", "wipe_context": False},
+    )
+
+    # Enable sandbox → current_beat_id should be cleared.
+    r_on = await client.post(f"/api/saves/{save_id}/sandbox-mode", json={"enabled": True})
+    assert r_on.status_code == 200
+    body_on = r_on.json()
+    assert body_on["sandbox_mode"] is True
+    assert body_on["current_beat_id"] is None
+
+    # Toggle off — beat stays null (intentional per spec; user must re-advance).
+    r_off = await client.post(f"/api/saves/{save_id}/sandbox-mode", json={"enabled": False})
+    assert r_off.status_code == 200
+    body_off = r_off.json()
+    assert body_off["sandbox_mode"] is False
+    assert body_off["current_beat_id"] is None
 
 
 async def test_list_saves_sorted_by_updated_at(client, mock_summarizer):

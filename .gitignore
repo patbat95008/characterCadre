@@ -25,6 +25,9 @@ frontend/.vite/
 # Runtime logs
 logs/
 
+# Playtest run artifacts — transcripts of local LLM output, regenerated per run
+backend/tests/playtest/runs/
+
 # Claude Code — local dev tooling, not for public repos
 .claude/
 

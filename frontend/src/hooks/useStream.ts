@@ -2,6 +2,7 @@ import { useState, useCallback, useRef } from 'react'
 import type {
   BeatTransitionEvent,
   DirectorEvent,
+  EndingReachedEvent,
   ErrorEvent,
   MessageCompleteEvent,
   NoticeEvent,
@@ -28,7 +29,7 @@ interface StreamCallbacks {
   onRegenerate?: (event: RegenerateEvent) => void
   onValidationWarning?: (event: ValidationWarningEvent) => void
   onValidationFailed?: (event: ValidationFailedEvent) => void
-  onEndingReached?: () => void
+  onEndingReached?: (event: EndingReachedEvent) => void
   onNotice?: (event: NoticeEvent) => void
   onRollResult?: (event: RollResultEvent) => void
 }
@@ -149,8 +150,12 @@ export function useStream() {
               callbacks.onValidationWarning(parsed)
             } catch { /* ignore */ }
           } else if (eventType === 'ending_reached' && callbacks.onEndingReached) {
-            console.log('[sse:ending_reached]')
-            callbacks.onEndingReached()
+            let parsed: EndingReachedEvent = { sandbox_mode: true }
+            try {
+              parsed = { sandbox_mode: true, ...(JSON.parse(data) as Partial<EndingReachedEvent>) }
+            } catch { /* keep default — backend always emits sandbox_mode=true */ }
+            console.log('[sse:ending_reached]', parsed)
+            callbacks.onEndingReached(parsed)
           } else if (eventType === 'validation_failed' && callbacks.onValidationFailed) {
             try {
               const parsed = JSON.parse(data) as ValidationFailedEvent

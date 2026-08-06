@@ -14,9 +14,12 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Optional
 
+from app import markers, turn_context
+from app.constants import DEFAULT_RESPONSE_RESERVE
 from app.models import Beat, Character, DirectorResponse, Message, Save, Scenario
 from app.ollama_client import (
     OLLAMA_MODEL,
@@ -43,11 +46,39 @@ from app.validation import (
 
 logger = logging.getLogger(__name__)
 
-def _build_options_instruction(transition_condition: Optional[str]) -> str:
+
+@contextmanager
+def _phase(name: str):
+    """Tag every Ollama call made inside this block with a phase label, so the
+    CC_DEBUG prompt dumps and llm.call markers say which phase produced them."""
+    token = turn_context.current_phase.set(name)
+    try:
+        yield
+    finally:
+        try:
+            turn_context.current_phase.reset(token)
+        except ValueError:  # pragma: no cover - context bookkeeping only
+            turn_context.current_phase.set("")
+
+
+def _build_options_instruction(
+    transition_condition: Optional[str],
+    advance_kind: str = "beat",
+) -> str:
+    """Build the Phase 3 options instruction.
+
+    `transition_condition` is the CURRENT beat's condition — what it takes to leave
+    the scene the party is standing in. `advance_kind` says what an advance would
+    even mean here, which is a separate question (see `classify_advance`).
+
+    Tone order is deliberate: bold comes first. The model emits the tones in the
+    order they are listed, and slot 0 is what a player clicking the top option
+    always gets — so the top option should be the one that leans forward.
+    """
     base = (
         "Based on the story so far, suggest exactly 4 short player actions or replies "
         "(10 words or fewer each) that the player character might do or say next. "
-        "Vary the tone: one cautious, one bold, one curious, one witty. "
+        "Vary the tone: one bold, one cautious, one curious, one witty — in that order. "
         "Return JSON with an 'options' array of exactly 4 objects. "
         "Each object must have:\n"
         "  'text' (the action string, 10 words or fewer)\n"
@@ -61,20 +92,48 @@ def _build_options_instruction(transition_condition: Optional[str]) -> str:
         "the beat, failure does not). Only add dice_roll when the action is genuinely "
         "risky or uncertain — not for simple dialogue or safe actions."
     )
+    if advance_kind == "none":
+        return (
+            base
+            + "\n\nThe story is not on a tracked beat right now. Set 'advances_beat' to "
+            "false on every option."
+        )
+    if advance_kind == "ending":
+        return (
+            base
+            + "\n\nThis is the final scene. Set 'advances_beat' to true on the one option "
+            "that brings the adventure to a close, if any option does. Otherwise leave "
+            "all false."
+        )
+    if advance_kind == "start":
+        return (
+            base
+            + "\n\nThe adventure has not begun yet. Set 'advances_beat' to true on the one "
+            "option that commits the party to starting it."
+        )
     if transition_condition:
         return (
             base
-            + f'\n\nCurrent beat transition condition: "{transition_condition}"\n'
-            "If one of the player options would clearly satisfy this condition, "
-            "set that option's 'advances_beat' to true. Otherwise leave all false."
+            + f'\n\nThe story moves on when: "{transition_condition}"\n'
+            "That is a completion test, not a direction of travel — the described "
+            "event has to actually happen. Set 'advances_beat' to true on exactly one "
+            "option if that option would clearly bring it about. Otherwise leave all false."
         )
     return base
 
 
 def find_next_beat(save: Save, scenario: Scenario) -> Optional[Beat]:
-    """Return the next beat by order after the current one, or None if none exists."""
-    if not scenario.beats or not save.current_beat_id or save.sandbox_mode:
+    """Return the next beat by order after the current one, or None if none exists.
+
+    A save starts with `current_beat_id=None` — the party is at the scenario's
+    opening message, before any beat has begun. From there the next beat is the
+    lowest-order one. Without this the player's beat-advance toggle was a no-op
+    on the first turn, since there was no anchor to advance from.
+    """
+    if not scenario.beats or save.sandbox_mode:
         return None
+    if not save.current_beat_id:
+        return min(scenario.beats, key=lambda b: b.order)
     beats_by_id = {b.id: b for b in scenario.beats}
     current = beats_by_id.get(save.current_beat_id)
     if not current:
@@ -86,6 +145,24 @@ def find_next_beat(save: Save, scenario: Scenario) -> Optional[Beat]:
     return forward[0] if forward else None
 
 
+def classify_advance(save: Save, scenario: Scenario) -> str:
+    """What would setting the beat-advance flag actually do right now?
+
+    Mirrors the player-flag branch in `routes/chat.py` so Phase 3 and the
+    `options.generated` marker agree with what a click really does:
+
+    - "start"  — no current beat yet; the flag moves into the first beat
+    - "beat"   — a forward beat exists; the flag moves into it
+    - "ending" — on the final beat, the flag signals the ending (NOT a dead button)
+    - "none"   — sandbox mode or a beatless scenario; the flag does nothing
+    """
+    if save.sandbox_mode or not scenario.beats:
+        return "none"
+    if find_next_beat(save, scenario) is not None:
+        return "start" if not save.current_beat_id else "beat"
+    return "ending" if save.current_beat_id else "none"
+
+
 # ── Phase 1: Director ─────────────────────────────────────────────────────────
 
 async def run_director(
@@ -93,7 +170,7 @@ async def run_director(
     scenario: Scenario,
     characters: dict[str, Character],
     favored_character_ids: list[str] | None = None,
-    response_reserve: int = 1024,
+    response_reserve: int = DEFAULT_RESPONSE_RESERVE,
     on_retry: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> DirectorResponse:
     """
@@ -113,12 +190,13 @@ async def run_director(
     schema = DirectorResponse.model_json_schema()
 
     async def call_director() -> dict:
-        messages = build_director_prompt(
-            save, scenario, characters,
-            favored_character_ids=favored_character_ids,
-            response_reserve=response_reserve,
-        )
-        return await structured_chat(OLLAMA_MODEL, messages, schema)
+        with _phase("phase1"):
+            messages = build_director_prompt(
+                save, scenario, characters,
+                favored_character_ids=favored_character_ids,
+                response_reserve=response_reserve,
+            )
+            return await structured_chat(OLLAMA_MODEL, messages, schema)
 
     async def on_retry_wrapped(reason: str) -> None:
         logger.warning(
@@ -157,7 +235,7 @@ async def run_director_draft(
     target_name: str,
     target_role: str,
     direction_note: Optional[str] = None,
-    response_reserve: int = 1024,
+    response_reserve: int = DEFAULT_RESPONSE_RESERVE,
     num_predict: int | None = None,
 ) -> str:
     """
@@ -167,13 +245,14 @@ async def run_director_draft(
     as context_draft to build_dm_prompt() or build_character_prompt() so that the
     target persona never sees the raw adventure log.
     """
-    messages = build_director_draft_prompt(
-        save, scenario, characters, target_name, target_role, direction_note,
-        response_reserve=response_reserve,
-    )
-    tokens: list[str] = []
-    async for token in stream_chat(OLLAMA_MODEL, messages, num_predict=num_predict):
-        tokens.append(token)
+    with _phase(f"draft:{target_role}"):
+        messages = build_director_draft_prompt(
+            save, scenario, characters, target_name, target_role, direction_note,
+            response_reserve=response_reserve,
+        )
+        tokens: list[str] = []
+        async for token in stream_chat(OLLAMA_MODEL, messages, num_predict=num_predict):
+            tokens.append(token)
     draft = "".join(t for t in tokens if t is not None).strip()
     logger.debug(
         "Director draft complete (save=%s, target=%s, role=%s, chars=%d)",
@@ -263,16 +342,20 @@ def apply_beat_transition(
 
     from app.variables import apply_variables
     starter = apply_variables(next_beat.starter_prompt, save.user_name, char_name=None)
-    msg = Message(
-        id=str(uuid.uuid4()),
-        role="dm",
-        character_id=None,
-        content=starter,
-        timestamp=datetime.now(timezone.utc).isoformat(),
-        is_dm_only=False,
-        beat_id_at_time=next_beat.id,
-    )
-    save.messages.append(msg)
+    # A beat may legitimately have no starter (Beat.starter_prompt has no default and
+    # "" is valid). Appending it anyway writes a blank bubble to the log and a
+    # zero-length message into every prompt built from that history afterwards.
+    if starter.strip():
+        msg = Message(
+            id=str(uuid.uuid4()),
+            role="dm",
+            character_id=None,
+            content=starter,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            is_dm_only=False,
+            beat_id_at_time=next_beat.id,
+        )
+        save.messages.append(msg)
 
     logger.info(
         "beat transition: %s -> %s (save=%s, trigger=%s)",
@@ -280,6 +363,15 @@ def apply_beat_transition(
         next_beat.name,
         save.id,
         trigger,
+    )
+    markers.emit(
+        "beat.advance",
+        to_id=next_beat.id,
+        to_order=next_beat.order,
+        from_name=old_beat_name,
+        to_name=next_beat.name,
+        trigger=trigger,
+        starter_chars=len(starter),
     )
     return {"new_beat_id": next_beat.id, "new_beat_name": next_beat.name}
 
@@ -291,7 +383,7 @@ async def run_phase2(
     scenario: Scenario,
     characters: dict[str, Character],
     director_response: DirectorResponse,
-    response_reserve: int = 1024,
+    response_reserve: int = DEFAULT_RESPONSE_RESERVE,
     num_predict: int | None = None,
     on_retry: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> AsyncGenerator[dict, None]:
@@ -313,7 +405,7 @@ async def _phase2_gen(
     scenario: Scenario,
     characters: dict[str, Character],
     director_response: DirectorResponse,
-    response_reserve: int = 1024,
+    response_reserve: int = DEFAULT_RESPONSE_RESERVE,
     num_predict: int | None = None,
     on_retry: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> AsyncGenerator[dict, None]:
@@ -341,109 +433,97 @@ async def _phase2_gen(
                 return msg.content
         return None
 
-    # ── DM narration (if requested) ───────────────────────────────────────────
+    # Build the ordered speaker plan up front. Each entry yields exactly one
+    # director-draft + speaker-stream pair, so the DM never gets drafted twice
+    # even when dm_should_narrate=True AND the chosen speaker is the DM.
+    speaker_plan: list[tuple[Character, str]] = []  # (character, target_role)
+
     if director_response.dm_should_narrate and dm_char:
-        dm_context = await run_director_draft(
-            save, scenario, characters,
-            target_name=dm_char.name,
-            target_role="narrator",
-            direction_note=director_response.direction_note or None,
-            response_reserve=response_reserve,
-            num_predict=num_predict,
-        )
-        dm_messages = build_dm_prompt(
-            save, scenario, dm_char,
-            context_draft=dm_context,
-            companion_names=companion_names,
-        )
-        async for event in _stream_speaker(
-            messages=dm_messages,
-            character_id=dm_char.id,
-            role="dm",
-            save=save,
-            previous_content=_last_generated_content_for(dm_char.id),
-            same_speaker_as_previous=True,
-            on_retry=on_retry,
-            num_predict=num_predict,
-        ):
-            yield event
+        speaker_plan.append((dm_char, "narrator"))
 
-    # ── Chosen character response ─────────────────────────────────────────────
     speaker_id = director_response.speaker_character_id
-
-    # Director may set speaker_character_id=None to mean "no follow-up speaker —
-    # player goes next." If narration also didn't happen, the turn produces no
-    # content; emit a UI notice so the player knows, and let the route proceed
-    # to Phase 3 (options) so they can recover by acting next themselves.
-    if speaker_id is None:
-        if not director_response.dm_should_narrate:
+    speaker: Optional[Character] = None
+    if speaker_id is not None:
+        speaker = characters.get(speaker_id)
+        if speaker is None:
             logger.warning(
-                "Phase 2: director chose null speaker AND no DM narration "
-                "(save=%s) — turn produced no content",
+                "Phase 2: speaker '%s' not found in characters dict (save=%s)",
+                speaker_id,
                 save.id,
             )
-            yield {
-                "event": "notice",
-                "level": "warning",
-                "message": "Warning: LLM chose to do nothing",
-            }
+        elif speaker.is_dm and dm_char and director_response.dm_should_narrate:
+            # DM was already queued as narrator; don't append a second DM step.
+            pass
+        elif speaker.is_dm:
+            speaker_plan.append((speaker, "narrator"))
         else:
-            logger.info(
-                "Phase 2: director chose null speaker after DM narration (save=%s) "
-                "— companions will not speak this turn",
-                save.id,
-            )
-        return
+            speaker_plan.append((speaker, "companion"))
 
-    speaker = characters.get(speaker_id)
-    if speaker is None:
+    if not speaker_plan:
+        # Validation now blocks (speaker_id=None AND dm_should_narrate=False),
+        # but a Director response with dm_should_narrate=True and no DM in the
+        # active roster can still land here. Emit a notice so the player knows
+        # nothing was generated and Phase 3 can still produce options.
         logger.warning(
-            "Phase 2: speaker '%s' not found in characters dict (save=%s)",
-            speaker_id,
+            "Phase 2: empty speaker plan (save=%s, dm_narrate=%s, speaker=%s) — "
+            "turn produced no content",
             save.id,
+            director_response.dm_should_narrate,
+            speaker_id or "none",
         )
+        markers.emit(
+            "speaker.empty_plan",
+            dm_narrate=director_response.dm_should_narrate,
+            speaker=speaker_id or "-",
+        )
+        yield {
+            "event": "notice",
+            "level": "warning",
+            "message": "Warning: LLM chose to do nothing",
+        }
         return
 
-    if speaker.is_dm and dm_char:
-        # DM is chosen speaker; draft a narrator brief (only if we didn't already narrate)
-        speaker_context = await run_director_draft(
-            save, scenario, characters,
-            target_name=speaker.name,
-            target_role="narrator",
-            direction_note=director_response.direction_note or None,
-            response_reserve=response_reserve,
-            num_predict=num_predict,
-        )
-        speaker_messages = build_dm_prompt(
-            save, scenario, speaker,
-            context_draft=speaker_context,
-            companion_names=companion_names,
-        )
-    else:
-        char_context = await run_director_draft(
-            save, scenario, characters,
-            target_name=speaker.name,
-            target_role="companion",
-            direction_note=director_response.direction_note or None,
-            response_reserve=response_reserve,
-            num_predict=num_predict,
-        )
-        speaker_messages = build_character_prompt(
-            speaker, scenario, save, save.user_name,
-            context_draft=char_context,
-        )
+    markers.emit(
+        "speaker.plan",
+        count=len(speaker_plan),
+        plan=",".join(f"{c.id}:{r}" for c, r in speaker_plan),
+    )
 
-    async for event in _stream_speaker(
-        messages=speaker_messages,
-        character_id=speaker_id,
-        role="dm" if speaker.is_dm else "character",
-        save=save,
-        previous_content=_last_generated_content_for(speaker_id),
-        same_speaker_as_previous=True,
-        on_retry=on_retry,
-        num_predict=num_predict,
-    ):
-        yield event
+    for character, target_role in speaker_plan:
+        context_draft = await run_director_draft(
+            save, scenario, characters,
+            target_name=character.name,
+            target_role=target_role,
+            direction_note=director_response.direction_note or None,
+            response_reserve=response_reserve,
+            num_predict=num_predict,
+        )
+        if target_role == "narrator":
+            messages = build_dm_prompt(
+                save, scenario, character,
+                context_draft=context_draft,
+                companion_names=companion_names,
+            )
+            role = "dm"
+        else:
+            messages = build_character_prompt(
+                character, scenario, save, save.user_name,
+                context_draft=context_draft,
+            )
+            role = "character"
+
+        with _phase("phase2"):
+            async for event in _stream_speaker(
+                messages=messages,
+                character_id=character.id,
+                role=role,
+                save=save,
+                previous_content=_last_generated_content_for(character.id),
+                same_speaker_as_previous=True,
+                on_retry=on_retry,
+                num_predict=num_predict,
+            ):
+                yield event
 
 
 _PREVIEW_WORDS = 25
@@ -508,6 +588,9 @@ async def _stream_speaker(
                 save.id,
                 character_id,
             )
+            markers.emit(
+                "speaker.loop", char=character_id, role=role, reason=result.reason
+            )
             msg_id = _commit_message(save, role, character_id, buffered)
             yield {"event": "validation_warning", "reason": result.reason}
             yield {"event": "message_complete", "message_id": msg_id, "character_id": character_id}
@@ -524,6 +607,13 @@ async def _stream_speaker(
                 max_retries + 1,
                 preview,
             )
+            markers.emit(
+                "speaker.regenerate",
+                char=character_id,
+                role=role,
+                attempt=attempt + 1,
+                reason=result.reason,
+            )
             if on_retry:
                 await on_retry(result.reason)
             yield {"event": "regenerate", "reason": result.reason, "character_id": character_id}
@@ -533,6 +623,12 @@ async def _stream_speaker(
                 save.id,
                 character_id,
                 preview,
+            )
+            markers.emit(
+                "speaker.exhausted",
+                char=character_id,
+                role=role,
+                reason=result.reason,
             )
             msg_id = _commit_message(save, role, character_id, buffered)
             yield {"event": "validation_warning", "reason": result.reason}
@@ -558,6 +654,14 @@ def _commit_message(save: Save, role: str, character_id: str, content: str) -> s
         "response committed (save=%s, role=%s, char=%s): %s",
         save.id, role, character_id, preview,
     )
+    markers.emit(
+        "speaker.commit",
+        char=character_id,
+        role=role,
+        msg_id=msg_id,
+        chars=len(content),
+        words=len(content.split()),
+    )
     return msg_id
 
 
@@ -568,7 +672,7 @@ async def run_phase3(
     scenario: Scenario,
     characters: dict[str, Character],
     direction_note: Optional[str] = None,
-    response_reserve: int = 1024,
+    response_reserve: int = DEFAULT_RESPONSE_RESERVE,
     num_predict: int | None = None,
     on_retry: Optional[Callable[[str], Awaitable[None]]] = None,
 ) -> tuple[list[dict], str]:
@@ -588,12 +692,23 @@ async def run_phase3(
     )
     if dm_char is None:
         logger.warning("Phase 3: no DM character found in active roster (save=%s)", save.id)
+        markers.emit("options.generated", count=len(OPTIONS_FALLBACK), fallback=True, reason="no_dm")
         return list(OPTIONS_FALLBACK), ""
 
-    # Determine if a beat advance is possible so the LLM can flag an option
-    next_beat = find_next_beat(save, scenario)
-    transition_condition = next_beat.transition_condition if next_beat else None
-    options_instruction = _build_options_instruction(transition_condition)
+    # Two independent questions, previously conflated into one:
+    #   - what would an advance even do here?  -> classify_advance()
+    #   - what would satisfy it?               -> the CURRENT beat's condition
+    # A beat's transition_condition is what moves you OUT of it, so reading it off
+    # find_next_beat() handed the options the condition for a scene the party has
+    # not reached — one beat ahead of the one the Director judges against.
+    advance_kind = classify_advance(save, scenario)
+    current_beat = None
+    if save.current_beat_id:
+        current_beat = next(
+            (b for b in scenario.beats if b.id == save.current_beat_id), None
+        )
+    transition_condition = current_beat.transition_condition if current_beat else None
+    options_instruction = _build_options_instruction(transition_condition, advance_kind)
 
     _dice_roll_schema = {
         "oneOf": [
@@ -646,13 +761,14 @@ async def run_phase3(
     )
 
     async def call_options() -> dict:
-        base_messages = build_dm_prompt(
-            save, scenario, dm_char,
-            context_draft=options_context,
-            companion_names=companion_names,
-        )
-        messages = base_messages + [{"role": "system", "content": options_instruction}]
-        return await structured_chat(OLLAMA_MODEL, messages, options_schema)
+        with _phase("phase3"):
+            base_messages = build_dm_prompt(
+                save, scenario, dm_char,
+                context_draft=options_context,
+                companion_names=companion_names,
+            )
+            messages = base_messages + [{"role": "system", "content": options_instruction}]
+            return await structured_chat(OLLAMA_MODEL, messages, options_schema)
 
     async def on_retry_wrapped(reason: str) -> None:
         logger.warning(
@@ -668,5 +784,28 @@ async def run_phase3(
         on_failure=lambda: list(OPTIONS_FALLBACK),
         on_retry=on_retry_wrapped,
         call_name="options",
+    )
+
+    # An advances_beat flag the flag handler cannot act on is a dead button: clicking
+    # it sets beat_advance on a turn where nothing happens. Only true for "none" —
+    # on the final beat the flag is the ending, not a no-op.
+    if advance_kind == "none":
+        for opt in options:
+            opt["advances_beat"] = False
+
+    advance_idx = next(
+        (i for i, o in enumerate(options) if o.get("advances_beat")), None
+    )
+    dice_idx = next((i for i, o in enumerate(options) if o.get("dice_roll")), None)
+    dice_spec = options[dice_idx]["dice_roll"] if dice_idx is not None else None
+    markers.emit(
+        "options.generated",
+        count=len(options),
+        advance_idx=advance_idx if advance_idx is not None else "-",
+        dice_idx=dice_idx if dice_idx is not None else "-",
+        dice=dice_spec["dice"] if dice_spec else "-",
+        difficulty=dice_spec["difficulty"] if dice_spec else "-",
+        transition_offered=advance_kind != "none",
+        advance_kind=advance_kind,
     )
     return options, options_context

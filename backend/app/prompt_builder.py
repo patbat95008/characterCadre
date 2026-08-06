@@ -44,12 +44,12 @@ from typing import Optional
 
 import tiktoken
 
+from app.constants import DEFAULT_RESPONSE_RESERVE
 from app.models import Character, Save, Scenario
 from app.variables import apply_variables
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_RESPONSE_RESERVE = 1024
 _ENCODING = tiktoken.get_encoding("cl100k_base")
 
 # Ollama role mapping
@@ -180,6 +180,20 @@ def build_character_prompt(
 
     messages = _build_prefix_messages(character, scenario, user_name, effective_char_name)
 
+    # Shared output rule for every companion. The roster listing bleeding into output
+    # ("Bram Stonefist: \"This axe...\"") and stage directions inside dialogue
+    # ("*I look at Kestrel.*") are structural tics, not per-character ones, so this
+    # lives here rather than being repeated in each card.
+    if not character.is_dm:
+        messages.append({
+            "role": "system",
+            "content": (
+                "Reply with spoken dialogue only. Never prefix your reply with your own "
+                "name, and never write stage directions or narrate your own actions — "
+                "the narrator handles those."
+            ),
+        })
+
     # Director-authored scene brief (replaces raw chat log)
     if context_draft:
         messages.append({"role": "user", "content": context_draft})
@@ -207,9 +221,8 @@ _DIRECTOR_SYSTEM = (
     "write dialogue, or take a character's voice. You return a structured decision."
 )
 
-_DIRECTOR_INSTRUCTION = (
-    "Based on the conversation so far, decide:\n"
-    "1) Who, if anyone, speaks next.\n"
+_DIRECTOR_RULE_SPEAKER = (
+    "Who, if anyone, speaks next.\n"
     "   - Set speaker_character_id to the character's id value (shown in square brackets in the roster "
     "above), NOT their display name.\n"
     "   - If a companion NPC witnessed, was addressed, or has a clear emotional or story reason to "
@@ -221,13 +234,79 @@ _DIRECTOR_INSTRUCTION = (
     "   - Set dm_should_narrate=true if the scene needs atmospheric narration, regardless of "
     "whether a companion also speaks. When speaker_character_id is null, dm_should_narrate should "
     "almost always be true — otherwise the turn produces nothing.\n"
-    "2) Whether the current beat's transition condition has been met. If yes, set "
-    "beat_transition=true and set next_beat_id to the id value shown in square brackets "
-    "in the beat roster above — NOT the beat name or order number.\n"
-    "3) Write a brief direction_note (1-2 sentences) for the DM summarizing what "
-    "this turn should accomplish narratively.\n"
-    "Respond in the required JSON format."
+    "   - If the player addressed a companion by name, asked them a question, or told them to do "
+    "something, that companion MUST get speaker_character_id. Do not let the DM answer for them."
 )
+
+_DIRECTOR_RULE_BEAT = (
+    "Whether the current beat's transition condition has been met. It is a completion test, "
+    "not a description of where the party roughly is — the event it names must have actually "
+    "happened. Heading toward it, being near it, or talking about it is beat_transition=false, "
+    "as is having no beat listed after the current one. If it has been met, set "
+    "beat_transition=true and copy next_beat_id exactly from the square brackets in the roster "
+    "— never a beat name, an order number, or an id you invented."
+)
+
+_DIRECTOR_RULE_NOTE = (
+    "Write a brief direction_note (1-2 sentences) for the DM summarizing what "
+    "this turn should accomplish narratively."
+)
+
+
+def _build_director_instruction(include_beat_rule: bool) -> str:
+    """Assemble the Director's closing instruction.
+
+    The beat rule is omitted when no beat roster was sent (sandbox mode, or a
+    scenario with no beats) — otherwise it is ~90 tokens per turn telling the model
+    to reason about a roster it cannot see.
+    """
+    rules = [_DIRECTOR_RULE_SPEAKER]
+    if include_beat_rule:
+        rules.append(_DIRECTOR_RULE_BEAT)
+    rules.append(_DIRECTOR_RULE_NOTE)
+    numbered = "\n".join(f"{i}) {rule}\n" for i, rule in enumerate(rules, start=1))
+    return (
+        "Based on the conversation so far, decide:\n"
+        + numbered
+        + "Respond in the required JSON format."
+    )
+
+
+def _companion_staleness(save: Save, characters: dict[str, "Character"]) -> str:
+    """One line stating how many player turns since each companion last spoke.
+
+    Returns "" before the first player turn, when the number would be meaningless.
+    A "turn" is counted as a user message, which is what the player experiences as
+    one exchange.
+    """
+    companions = [
+        characters[cid]
+        for cid in save.active_character_ids
+        if cid in characters and not characters[cid].is_dm
+    ]
+    if not companions:
+        return ""
+    if not any(m.role == "user" for m in save.messages):
+        return ""
+
+    parts: list[str] = []
+    for char in companions:
+        turns = 0
+        spoken = False
+        for msg in reversed(save.messages):
+            if msg.character_id == char.id:
+                spoken = True
+                break
+            if msg.role == "user":
+                turns += 1
+        if not spoken:
+            parts.append(f"{char.name}: has not spoken yet")
+        elif turns == 0:
+            parts.append(f"{char.name}: spoke last turn")
+        else:
+            parts.append(f"{char.name}: {turns} turns ago")
+
+    return "Turns since each companion last spoke — " + ", ".join(parts) + "."
 
 
 def build_director_prompt(
@@ -235,7 +314,7 @@ def build_director_prompt(
     scenario: Scenario,
     characters: dict[str, "Character"],
     favored_character_ids: list[str] | None = None,
-    response_reserve: int = _DEFAULT_RESPONSE_RESERVE,
+    response_reserve: int = DEFAULT_RESPONSE_RESERVE,
 ) -> list[dict[str, str]]:
     """
     Build the full Ollama messages list for the Director's routing call.
@@ -288,7 +367,14 @@ def build_director_prompt(
                 ),
             })
 
+    # 3c. Companion staleness — how long since each has had a line. Exhortation alone
+    # was not moving the Director off speaker_character_id=null, so give it the fact.
+    staleness = _companion_staleness(save, characters)
+    if staleness:
+        prefix.append({"role": "system", "content": staleness})
+
     # 4. Beat roster (only if beats exist and not sandbox_mode)
+    beat_roster_sent = False
     if scenario.beats and not save.sandbox_mode:
         beats_by_id = {b.id: b for b in scenario.beats}
         current_order = -1
@@ -307,15 +393,28 @@ def build_director_prompt(
             )
 
         if beat_lines:
+            # On the last beat the model reliably invents a next_beat_id rather than
+            # declining, so say the terminal case outright instead of leaving it to
+            # be inferred from the roster having no further entries.
+            is_terminal = bool(save.current_beat_id) and not any(
+                b.order > current_order for b in scenario.beats
+            )
+            footer = (
+                "\nThis is the final beat. There is no next beat and none can be "
+                "invented — set beat_transition=false."
+                if is_terminal
+                else "\nYou may signal a transition to the next beat OR skip ahead to a later "
+                "beat if the story has clearly moved past intervening events. You cannot go backward."
+            )
             prefix.append({
                 "role": "system",
                 "content": (
                     "The story is structured in the following beats:\n"
                     + "\n".join(beat_lines)
-                    + "\nYou may signal a transition to the next beat OR skip ahead to a later "
-                    "beat if the story has clearly moved past intervening events. You cannot go backward."
+                    + footer
                 ),
             })
+            beat_roster_sent = True
 
     # 5. Persistent messages
     if scenario.persistent_messages:
@@ -341,7 +440,10 @@ def build_director_prompt(
     chat = _build_truncated_chat(save, max_tokens=max(0, available_chat_tokens), strip_dm_only=False)
 
     # 8. Hardcoded instruction (always last)
-    instruction_msg = {"role": "system", "content": _DIRECTOR_INSTRUCTION}
+    instruction_msg = {
+        "role": "system",
+        "content": _build_director_instruction(include_beat_rule=beat_roster_sent),
+    }
     messages = prefix + chat + [instruction_msg]
 
     logger.debug(
@@ -383,7 +485,7 @@ def build_director_draft_prompt(
     target_name: str,
     target_role: str,
     direction_note: Optional[str] = None,
-    response_reserve: int = _DEFAULT_RESPONSE_RESERVE,
+    response_reserve: int = DEFAULT_RESPONSE_RESERVE,
 ) -> list[dict[str, str]]:
     """
     Build the Ollama messages list for a Director context-drafting call (Phase 1.5).
@@ -467,17 +569,21 @@ def build_dm_prompt(
     description = apply_variables(dm_character.description, user_name, char_name)
     messages.append({"role": "system", "content": description})
 
-    # 2b. Companion exclusion: reinforce that the DM must not voice named party members
-    if companion_names:
-        names_str = ", ".join(companion_names)
-        messages.append({
-            "role": "system",
-            "content": (
-                f"IMPORTANT: Do not write dialogue for or speak as these companion characters: "
-                f"{names_str}. They will each speak in their own separate turn after your narration. "
-                f"Describe their actions or reactions from the outside only, if at all."
-            ),
-        })
+    # 2b. Exclusion rule: the DM narrates the world, not the people in it. The old
+    # "describe their actions from the outside" permission is what produced
+    # "As Silvaine rises, you feel a chill..." on a turn where the player had asked
+    # Silvaine to act — she became scenery instead of a character.
+    exclusion_names = list(companion_names or []) + [user_name]
+    names_str = ", ".join(exclusion_names)
+    messages.append({
+        "role": "system",
+        "content": (
+            f"IMPORTANT: You narrate the world, not the people in it. Do not decide what "
+            f"{names_str} say, do, or choose — no dialogue for them, no actions on their "
+            f"behalf, no moving them around the scene. Each of them acts in their own turn. "
+            f"Narrate only what {user_name} has already stated, and the world's response to it."
+        ),
+    })
 
     # 3. DM response examples
     examples_text = _format_response_examples(dm_character, user_name, char_name)

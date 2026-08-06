@@ -33,7 +33,8 @@
       "Bash(python -m pytest tests/unit/ --tb=short)",
       "Bash(python -m pytest tests/integration/test_routes.py --tb=short)",
       "Bash(python -m pytest --tb=short)",
-      "Bash(python -m pytest tests/ -x -q)"
+      "Bash(python -m pytest tests/ -x -q)",
+      "Bash(python -m pytest)"
     ]
   }
 }

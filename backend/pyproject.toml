@@ -30,3 +30,9 @@ include = ["app*"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+markers = [
+    "live: drives real Ollama end-to-end; slow (minutes per test)",
+]
+# Live playtests are excluded from the default run. Opt in with `-m live`,
+# which overrides this.
+addopts = "-m 'not live'"

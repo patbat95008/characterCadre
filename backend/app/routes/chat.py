@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
-from app import dice, storage
+from app import dice, markers, storage, turn_context
 from app.dice import DiceResult
 from app.models import Character, Message, TurnRequest
 from app.ollama_client import OllamaTimeoutError, OllamaUnreachableError
@@ -94,173 +94,276 @@ async def chat_turn(request: TurnRequest) -> StreamingResponse:
     num_predict = request.max_response_tokens
 
     async def generate():
+        # Every Ollama call this turn makes gets tagged with this id, in the
+        # marker stream and in the CC_DEBUG prompt dumps, so a turn can be
+        # reconstructed after the fact.
+        turn_id = uuid.uuid4().hex[:8]
+        turn_token = turn_context.current_turn_id.set(turn_id)
+        stats_token = turn_context.current_turn_stats.set({})
+
         start_time = datetime.now(timezone.utc)
 
-        user_msg = Message(
-            id=str(uuid.uuid4()),
-            role="user",
-            character_id=None,
-            content=request.user_message,
-            timestamp=start_time.isoformat(),
-            beat_id_at_time=save.current_beat_id,
-        )
-        save.messages.append(user_msg)
+        try:
+            markers.emit(
+                "turn.start",
+                save=save.id,
+                beat=save.current_beat_id or "-",
+                sandbox=save.sandbox_mode,
+                advance_flag=request.beat_advance,
+                dice=request.dice_roll.dice if request.dice_roll else "-",
+                msg_chars=len(request.user_message),
+            )
 
-        # ── Dice roll resolution (before Phase 1 so the Director sees the result) ──
-        dice_result: DiceResult | None = None
-        if request.dice_roll and not save.sandbox_mode:
-            dice_result = dice.roll_dice(
-                request.dice_roll.dice, request.dice_roll.difficulty
-            )
-            logger.info(
-                "dice roll (save=%s): %s %s → %d/%d — %s",
-                save.id,
-                dice_result.dice,
-                dice_result.difficulty,
-                dice_result.value,
-                dice_result.max_value,
-                dice_result.outcome,
-            )
-            # Emit roll result to frontend immediately
-            yield _sse("roll_result", dice_result.model_dump())
-            # Inject context message so the Director and DM narrate around the outcome
-            roll_context_msg = Message(
+            user_msg = Message(
                 id=str(uuid.uuid4()),
-                role="dm",
+                role="user",
                 character_id=None,
-                content=dice.build_llm_context_message(request.user_message, dice_result),
+                content=request.user_message,
                 timestamp=start_time.isoformat(),
-                is_dm_only=True,
                 beat_id_at_time=save.current_beat_id,
             )
-            save.messages.append(roll_context_msg)
+            save.messages.append(user_msg)
 
-        try:
-            # ── Phase 1: Director ─────────────────────────────────────────────
-            director_failures: list[dict] = []
+            # ── Dice roll resolution (before Phase 1 so the Director sees the result) ──
+            dice_result: DiceResult | None = None
+            if request.dice_roll and not save.sandbox_mode:
+                dice_result = dice.roll_dice(
+                    request.dice_roll.dice, request.dice_roll.difficulty
+                )
+                logger.info(
+                    "dice roll (save=%s): %s %s → %d/%d — %s",
+                    save.id,
+                    dice_result.dice,
+                    dice_result.difficulty,
+                    dice_result.value,
+                    dice_result.max_value,
+                    dice_result.outcome,
+                )
+                markers.emit(
+                    "dice.roll",
+                    dice=dice_result.dice,
+                    difficulty=dice_result.difficulty,
+                    value=dice_result.value,
+                    max=dice_result.max_value,
+                    threshold=dice_result.threshold,
+                    outcome=dice_result.outcome,
+                    nat_crit=dice_result.is_nat_crit,
+                )
+                # Emit roll result to frontend immediately
+                yield _sse("roll_result", dice_result.model_dump())
+                # Inject context message so the Director and DM narrate around the outcome
+                roll_context_msg = Message(
+                    id=str(uuid.uuid4()),
+                    role="dm",
+                    character_id=None,
+                    content=dice.build_llm_context_message(request.user_message, dice_result),
+                    timestamp=start_time.isoformat(),
+                    is_dm_only=True,
+                    beat_id_at_time=save.current_beat_id,
+                )
+                save.messages.append(roll_context_msg)
 
-            async def on_director_retry(reason: str) -> None:
-                director_failures.append({"call": "director", "reason": reason})
+            try:
+                # ── Phase 1: Director ─────────────────────────────────────────────
+                director_failures: list[dict] = []
 
-            director_response = await run_director(
-                save, scenario, characters,
-                favored_character_ids=favored_character_ids,
-                response_reserve=response_reserve,
-                on_retry=on_director_retry,
-            )
+                async def on_director_retry(reason: str) -> None:
+                    director_failures.append({"call": "director", "reason": reason})
 
-            for evt in director_failures:
+                director_response = await run_director(
+                    save, scenario, characters,
+                    favored_character_ids=favored_character_ids,
+                    response_reserve=response_reserve,
+                    on_retry=on_director_retry,
+                )
+
+                for evt in director_failures:
+                    yield _sse("validation_failed", evt)
+
+                logger.info(
+                    "director decision (save=%s): speaker=%s dm_narrate=%s beat_transition=%s next_beat=%s | %s",
+                    save.id,
+                    director_response.speaker_character_id or "none",
+                    director_response.dm_should_narrate,
+                    director_response.beat_transition,
+                    director_response.next_beat_id or "none",
+                    director_response.direction_note or "(no note)",
+                )
+                markers.emit(
+                    "director.decision",
+                    speaker=director_response.speaker_character_id or "-",
+                    dm_narrate=director_response.dm_should_narrate,
+                    beat_transition=director_response.beat_transition,
+                    next_beat=director_response.next_beat_id or "-",
+                    retries=len(director_failures),
+                    note=director_response.direction_note or "-",
+                )
+
+                yield _sse("director", {
+                    "speaker_id": director_response.speaker_character_id,
+                    "dm_narrating": director_response.dm_should_narrate,
+                    "direction_note": director_response.direction_note,
+                })
+
+                # ── Player-driven beat advance (overrides Director's beat decision) ─
+                # If this was a dice roll, beat advance is only eligible on success/crit success
+                beat_advance_eligible = request.beat_advance and (
+                    dice_result is None or dice.outcome_is_success(dice_result.outcome)
+                )
+
+                beat_trigger = "director"
+                if beat_advance_eligible and not save.sandbox_mode:
+                    next_beat = find_next_beat(save, scenario)
+                    if next_beat:
+                        # If Director already picked a different next beat, surface
+                        # the disagreement before the player flag silently overrides.
+                        if (
+                            director_response.beat_transition
+                            and director_response.next_beat_id
+                            and director_response.next_beat_id != next_beat.id
+                        ):
+                            logger.info(
+                                "player beat advance overrides Director's choice "
+                                "(save=%s, director_next=%s, player_next=%s)",
+                                save.id,
+                                director_response.next_beat_id,
+                                next_beat.id,
+                            )
+                            markers.emit(
+                                "beat.override",
+                                director_next=director_response.next_beat_id,
+                                player_next=next_beat.id,
+                            )
+                        director_response.beat_transition = True
+                        director_response.next_beat_id = next_beat.id
+                        beat_trigger = "player"
+                        logger.info(
+                            "player-triggered beat advance to '%s' (save=%s)",
+                            next_beat.name, save.id,
+                        )
+                    elif save.current_beat_id and scenario.beats:
+                        # Player is on the final beat — signal ending
+                        director_response.beat_transition = True
+                        director_response.next_beat_id = None
+                        beat_trigger = "player"
+                    else:
+                        # The flag was set but there is nowhere to go — most often
+                        # because current_beat_id is still null on a fresh save, so
+                        # find_next_beat() has no anchor to advance from.
+                        markers.emit(
+                            "beat.blocked",
+                            reason="no_next_beat",
+                            beat=save.current_beat_id or "-",
+                        )
+                elif request.beat_advance and save.sandbox_mode:
+                    markers.emit("beat.blocked", reason="sandbox")
+                elif request.beat_advance and dice_result is not None:
+                    # Requested an advance behind a skill check that failed.
+                    markers.emit(
+                        "beat.blocked",
+                        reason="dice_failure",
+                        outcome=dice_result.outcome,
+                    )
+
+                # ── Beat transition + ending detection ────────────────────────────
+                # Ending must be detected BEFORE apply_beat_transition mutates the save.
+                # On ending we emit a single `ending_reached` event carrying the final
+                # beat info; non-ending transitions still emit `beat_transition`.
+                ending = is_final_beat_completion(save, scenario, director_response)
+                beat_data = apply_beat_transition(save, scenario, director_response, trigger=beat_trigger)
+                if ending:
+                    save.sandbox_mode = True
+                    ending_payload: dict = {"sandbox_mode": True}
+                    if beat_data:
+                        ending_payload.update(beat_data)
+                    yield _sse("ending_reached", ending_payload)
+                    logger.info("ending reached (save=%s) — sandbox mode enabled", save.id)
+                    markers.emit("ending.reached", trigger=beat_trigger)
+                elif beat_data:
+                    yield _sse("beat_transition", beat_data)
+
+                # ── Phase 2: stream DM + character ────────────────────────────────
+                phase2_gen = await run_phase2(
+                    save, scenario, characters, director_response,
+                    response_reserve=response_reserve,
+                    num_predict=num_predict,
+                )
+                async for event_dict in phase2_gen:
+                    event_name = event_dict["event"]
+                    payload = {k: v for k, v in event_dict.items() if k != "event"}
+                    yield _sse(event_name, payload)
+
+            except OllamaUnreachableError as exc:
+                logger.warning("Ollama unreachable during turn (save=%s): %s", save.id, exc)
+                markers.emit("turn.error", reason="ollama_unreachable")
+                yield _sse("error", {"reason": "ollama_unreachable"})
+                _rollback_messages(save, dice_result)
+                return
+            except OllamaTimeoutError as exc:
+                logger.warning("Ollama timeout during turn (save=%s): %s", save.id, exc)
+                markers.emit("turn.error", reason="ollama_timeout")
+                yield _sse("error", {"reason": "ollama_timeout"})
+                _rollback_messages(save, dice_result)
+                return
+            except Exception as exc:
+                logger.error(
+                    "Unhandled error during turn (save=%s): %s", save.id, exc, exc_info=True
+                )
+                markers.emit("turn.error", reason="internal_error", detail=str(exc))
+                yield _sse("error", {"reason": "internal_error"})
+                _rollback_messages(save, dice_result)
+                return
+
+            await storage.save_save_locked(save)
+
+            duration_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
+            logger.info("turn completed (save=%s, duration=%dms)", save.id, duration_ms)
+
+            # ── Phase 3 ───────────────────────────────────────────────────────────
+            options_failures: list[dict] = []
+
+            async def on_options_retry(reason: str) -> None:
+                options_failures.append({"call": "options", "reason": reason})
+
+            try:
+                options, options_context = await run_phase3(
+                    save, scenario, characters,
+                    direction_note=director_response.direction_note or None,
+                    response_reserve=response_reserve,
+                    num_predict=num_predict,
+                    on_retry=on_options_retry,
+                )
+            except Exception as exc:
+                logger.warning("Phase 3 failed (save=%s): %s", save.id, exc)
+                markers.emit("options.error", detail=str(exc))
+                options = list(OPTIONS_FALLBACK)
+                options_context = ""
+
+            for evt in options_failures:
                 yield _sse("validation_failed", evt)
 
-            logger.info(
-                "director decision (save=%s): speaker=%s dm_narrate=%s beat_transition=%s next_beat=%s | %s",
-                save.id,
-                director_response.speaker_character_id or "none",
-                director_response.dm_should_narrate,
-                director_response.beat_transition,
-                director_response.next_beat_id or "none",
-                director_response.direction_note or "(no note)",
+            if options_context:
+                yield _sse("options_context", {"context": options_context})
+            yield _sse("options", {"options": options})
+
+            stats = turn_context.get_stats()
+            markers.emit(
+                "turn.end",
+                ms=int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000),
+                llm_calls=stats.get("llm_calls", 0),
+                llm_ms=stats.get("llm_ms", 0),
+                beat=save.current_beat_id or "-",
+                messages=len(save.messages),
             )
-
-            yield _sse("director", {
-                "speaker_id": director_response.speaker_character_id,
-                "dm_narrating": director_response.dm_should_narrate,
-                "direction_note": director_response.direction_note,
-            })
-
-            # ── Player-driven beat advance (overrides Director's beat decision) ─
-            # If this was a dice roll, beat advance is only eligible on success/crit success
-            beat_advance_eligible = request.beat_advance and (
-                dice_result is None or dice.outcome_is_success(dice_result.outcome)
-            )
-
-            beat_trigger = "director"
-            if beat_advance_eligible and not save.sandbox_mode:
-                next_beat = find_next_beat(save, scenario)
-                if next_beat:
-                    director_response.beat_transition = True
-                    director_response.next_beat_id = next_beat.id
-                    beat_trigger = "player"
-                    logger.info(
-                        "player-triggered beat advance to '%s' (save=%s)",
-                        next_beat.name, save.id,
-                    )
-                elif save.current_beat_id and scenario.beats:
-                    # Player is on the final beat — signal ending
-                    director_response.beat_transition = True
-                    director_response.next_beat_id = None
-                    beat_trigger = "player"
-
-            # ── Beat transition + ending detection ────────────────────────────
-            ending = is_final_beat_completion(save, scenario, director_response)
-            beat_data = apply_beat_transition(save, scenario, director_response, trigger=beat_trigger)
-            if beat_data:
-                yield _sse("beat_transition", beat_data)
-            if ending:
-                save.sandbox_mode = True
-                yield _sse("ending_reached", {})
-                logger.info("ending reached (save=%s) — sandbox mode enabled", save.id)
-
-            # ── Phase 2: stream DM + character ────────────────────────────────
-            phase2_gen = await run_phase2(
-                save, scenario, characters, director_response,
-                response_reserve=response_reserve,
-                num_predict=num_predict,
-            )
-            async for event_dict in phase2_gen:
-                event_name = event_dict["event"]
-                payload = {k: v for k, v in event_dict.items() if k != "event"}
-                yield _sse(event_name, payload)
-
-        except OllamaUnreachableError as exc:
-            logger.warning("Ollama unreachable during turn (save=%s): %s", save.id, exc)
-            yield _sse("error", {"reason": "ollama_unreachable"})
-            _rollback_messages(save, dice_result)
-            return
-        except OllamaTimeoutError as exc:
-            logger.warning("Ollama timeout during turn (save=%s): %s", save.id, exc)
-            yield _sse("error", {"reason": "ollama_timeout"})
-            _rollback_messages(save, dice_result)
-            return
-        except Exception as exc:
-            logger.error(
-                "Unhandled error during turn (save=%s): %s", save.id, exc, exc_info=True
-            )
-            yield _sse("error", {"reason": "internal_error"})
-            _rollback_messages(save, dice_result)
-            return
-
-        storage.save_save(save)
-
-        duration_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
-        logger.info("turn completed (save=%s, duration=%dms)", save.id, duration_ms)
-
-        # ── Phase 3 ───────────────────────────────────────────────────────────
-        options_failures: list[dict] = []
-
-        async def on_options_retry(reason: str) -> None:
-            options_failures.append({"call": "options", "reason": reason})
-
-        try:
-            options, options_context = await run_phase3(
-                save, scenario, characters,
-                direction_note=director_response.direction_note or None,
-                response_reserve=response_reserve,
-                num_predict=num_predict,
-                on_retry=on_options_retry,
-            )
-        except Exception as exc:
-            logger.warning("Phase 3 failed (save=%s): %s", save.id, exc)
-            options = list(OPTIONS_FALLBACK)
-            options_context = ""
-
-        for evt in options_failures:
-            yield _sse("validation_failed", evt)
-
-        if options_context:
-            yield _sse("options_context", {"context": options_context})
-        yield _sse("options", {"options": options})
-        yield _sse("done", "")
+            yield _sse("done", "")
+        finally:
+            # Defensive: a context mismatch must never turn into a failed turn.
+            try:
+                turn_context.current_turn_stats.reset(stats_token)
+                turn_context.current_turn_id.reset(turn_token)
+            except ValueError:  # pragma: no cover - context bookkeeping only
+                turn_context.current_turn_stats.set(None)
+                turn_context.current_turn_id.set("")
 
     return StreamingResponse(
         generate(),

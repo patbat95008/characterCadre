@@ -112,6 +112,53 @@ def test_save_round_trip():
     assert len(fetched.messages) == len(save.messages)
 
 
+async def test_save_save_locked_serializes_concurrent_writes():
+    """Two concurrent save_save_locked calls for the same save_id must run
+    sequentially, not interleave. We check the held flag across the lock
+    boundary to detect overlap."""
+    import asyncio
+
+    save = make_stage1_save()
+    # Reset any prior lock so the test starts clean.
+    storage._save_locks.pop(save.id, None)
+
+    held = False
+    overlap = False
+    real_save_save = storage.save_save
+
+    async def fake_save_save_locked(s):
+        nonlocal held, overlap
+        async with storage._lock_for(s.id):
+            if held:
+                overlap = True
+            held = True
+            # Yield control so a competing task could interleave if the lock
+            # weren't actually held — proving the lock provides mutual exclusion.
+            await asyncio.sleep(0)
+            real_save_save(s)
+            held = False
+
+    await asyncio.gather(
+        fake_save_save_locked(save),
+        fake_save_save_locked(save),
+        fake_save_save_locked(save),
+    )
+    assert overlap is False
+    # Final state is persisted (lock didn't drop writes).
+    assert storage.get_save(save.id) is not None
+
+
+async def test_save_save_locked_persists_changes():
+    """The async wrapper still writes through to disk."""
+    save = make_stage1_save()
+    storage._save_locks.pop(save.id, None)
+    save.name = "renamed-via-locked"
+    await storage.save_save_locked(save)
+    fetched = storage.get_save(save.id)
+    assert fetched is not None
+    assert fetched.name == "renamed-via-locked"
+
+
 def test_save_save_updates_updated_at():
     save = make_stage1_save()
     original_updated = save.updated_at
